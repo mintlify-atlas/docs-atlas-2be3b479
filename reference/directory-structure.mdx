@@ -1,0 +1,349 @@
+---
+title: "Directory Structure"
+description: Complete annotated source tree of Claude Code, with descriptions of every major directory, key files, and codebase statistics.
+---
+
+## Codebase Statistics
+
+| Item | Count |
+|------|-------|
+| Files (`.ts` / `.tsx`) | ~1,884 |
+| Total lines | ~512,664 |
+| Largest single file | `src/query.ts` (~785 KB) |
+| Built-in tools | ~40+ |
+| Slash commands | ~80+ |
+| Dependencies (`node_modules`) | ~192 packages |
+| Runtime | Bun (compiled to Node.js >= 18 bundle) |
+
+<Note>
+  All analysis is based on Claude Code v2.1.88. The codebase is compiled with Bun, which performs dead code elimination via compile-time feature flags. The distributed binary may differ significantly from the source in terms of included code paths.
+</Note>
+
+---
+
+## Full Source Tree
+
+```text
+src/
+├── main.tsx                 # REPL bootstrap, 4,683 lines
+├── QueryEngine.ts           # SDK/headless query lifecycle engine
+├── query.ts                 # Main agent loop (785KB, largest file)
+├── Tool.ts                  # Tool interface + buildTool factory
+├── Task.ts                  # Task types, IDs, state base
+├── tools.ts                 # Tool registry, presets, filtering
+├── commands.ts              # Slash command definitions
+├── context.ts               # User input context
+├── cost-tracker.ts          # API cost accumulation
+├── setup.ts                 # First-run setup flow
+│
+├── bridge/                  # Claude Desktop / remote bridge
+│   ├── bridgeMain.ts        #   Session lifecycle manager
+│   ├── bridgeApi.ts         #   HTTP client
+│   ├── bridgeConfig.ts      #   Connection config
+│   ├── bridgeMessaging.ts   #   Message relay
+│   ├── sessionRunner.ts     #   Process spawning
+│   ├── jwtUtils.ts          #   JWT refresh
+│   ├── workSecret.ts        #   Auth tokens
+│   └── capacityWake.ts      #   Capacity-based wakeup
+│
+├── cli/                     # CLI infrastructure
+│   ├── handlers/            #   Command handlers
+│   └── transports/          #   I/O transports (stdio, structured)
+│
+├── commands/                # ~80 slash commands
+│   ├── agents/              #   Agent management
+│   ├── compact/             #   Context compaction
+│   ├── config/              #   Settings management
+│   ├── help/                #   Help display
+│   ├── login/               #   Authentication
+│   ├── mcp/                 #   MCP server management
+│   ├── memory/              #   Memory system
+│   ├── plan/                #   Plan mode
+│   ├── resume/              #   Session resume
+│   ├── review/              #   Code review
+│   └── ...                  #   70+ more commands
+│
+├── components/              # React/Ink terminal UI
+│   ├── design-system/       #   Reusable UI primitives
+│   ├── messages/            #   Message rendering
+│   ├── permissions/         #   Permission dialogs
+│   ├── PromptInput/         #   Input field + suggestions
+│   ├── LogoV2/              #   Branding + welcome screen
+│   ├── Settings/            #   Settings panels
+│   ├── Spinner.tsx          #   Loading indicators
+│   └── ...                  #   40+ component groups
+│
+├── entrypoints/             # Application entry points
+│   ├── cli.tsx              #   CLI main (version, help, daemon)
+│   ├── sdk/                 #   Agent SDK (types, sessions)
+│   └── mcp.ts               #   MCP server entry
+│
+├── hooks/                   # React hooks
+│   ├── useCanUseTool.tsx    #   Permission checking
+│   ├── useReplBridge.tsx    #   Bridge connection
+│   ├── notifs/              #   Notification hooks
+│   └── toolPermission/      #   Tool permission handlers
+│
+├── services/                # Business logic layer
+│   ├── api/                 #   Claude API client
+│   │   ├── claude.ts        #     Streaming API calls
+│   │   ├── errors.ts        #     Error categorization
+│   │   └── withRetry.ts     #     Retry logic
+│   ├── analytics/           #   Telemetry + GrowthBook
+│   ├── compact/             #   Context compression
+│   ├── mcp/                 #   MCP connection management
+│   ├── tools/               #   Tool execution engine
+│   │   ├── StreamingToolExecutor.ts  # Parallel tool runner
+│   │   └── toolOrchestration.ts      # Batch orchestration
+│   ├── plugins/             #   Plugin loader
+│   └── settingsSync/        #   Cross-device settings
+│
+├── state/                   # Application state
+│   ├── AppStateStore.ts     #   Store definition
+│   └── AppState.tsx         #   React provider + hooks
+│
+├── tasks/                   # Task implementations
+│   ├── LocalShellTask/      #   Bash command execution
+│   ├── LocalAgentTask/      #   Sub-agent execution
+│   ├── RemoteAgentTask/     #   Remote agent via bridge
+│   ├── InProcessTeammateTask/ # In-process teammate
+│   └── DreamTask/           #   Background thinking
+│
+├── tools/                   # 40+ tool implementations
+│   ├── AgentTool/           #   Sub-agent spawning + fork
+│   ├── BashTool/            #   Shell command execution
+│   ├── FileReadTool/        #   File reading (PDF, image, etc)
+│   ├── FileEditTool/        #   String-replace editing
+│   ├── FileWriteTool/       #   Full file creation
+│   ├── GlobTool/            #   File pattern search
+│   ├── GrepTool/            #   Content search (ripgrep)
+│   ├── WebFetchTool/        #   HTTP fetching
+│   ├── WebSearchTool/       #   Web search
+│   ├── MCPTool/             #   MCP tool wrapper
+│   ├── SkillTool/           #   Skill invocation
+│   ├── AskUserQuestionTool/ #   User interaction
+│   └── ...                  #   30+ more tools
+│
+├── types/                   # Type definitions
+│   ├── message.ts           #   Message discriminated unions
+│   ├── permissions.ts       #   Permission types
+│   ├── tools.ts             #   Tool progress types
+│   └── ids.ts               #   Branded ID types
+│
+├── utils/                   # Utilities (largest directory)
+│   ├── permissions/         #   Permission rule engine
+│   ├── messages/            #   Message formatting
+│   ├── model/               #   Model selection logic
+│   ├── settings/            #   Settings management
+│   ├── sandbox/             #   Sandbox runtime adapter
+│   ├── hooks/               #   Hook execution
+│   ├── memory/              #   Memory system utils
+│   ├── git/                 #   Git operations
+│   ├── github/              #   GitHub API
+│   ├── bash/                #   Bash execution helpers
+│   ├── swarm/               #   Multi-agent swarm
+│   ├── telemetry/           #   Telemetry reporting
+│   └── ...                  #   30+ more util groups
+│
+└── vendor/                  # Native module source stubs
+    ├── audio-capture-src/   #   Audio input
+    ├── image-processor-src/ #   Image processing
+    ├── modifiers-napi-src/  #   Native modifiers
+    └── url-handler-src/     #   URL handling
+```
+
+---
+
+## Root-Level Files
+
+The files at `src/` root form the core of the agent loop and tool system.
+
+| File | Size | Description |
+|------|------|-------------|
+| `main.tsx` | 4,683 lines | REPL bootstrap. Initializes the interactive terminal UI using React/Ink, sets up the `AppStateProvider`, handles keyboard input, and drives the main conversation loop in interactive mode. |
+| `QueryEngine.ts` | — | SDK/headless query lifecycle engine. Exposes `submitMessage(prompt)` as an `AsyncGenerator<SDKMessage>`, enabling programmatic use of the agent loop without a terminal UI. Used by the SDK entrypoint and headless integrations. |
+| `query.ts` | ~785 KB | **The largest file in the codebase.** Contains the main agent loop: the `while (true)` loop that calls the Claude API, checks `stop_reason`, executes tools via `StreamingToolExecutor`, appends results, and loops back. Also contains `fetchSystemPromptParts()`, `processUserInput()`, `autoCompact()`, and `recordTranscript()`. |
+| `Tool.ts` | — | Defines the `Tool<Input, Output, Progress>` interface and the `buildTool()` factory function. Every tool in `src/tools/` is created with `buildTool()`, which provides safe defaults for all capability flags and rendering methods. |
+| `Task.ts` | — | Defines task types, ID formats, and base state. Task IDs use prefix + 8 character format: `b` = bash, `a` = agent, `r` = remote, `t` = team. |
+| `tools.ts` | — | Tool registry and preset management. Registers all built-in tools, handles feature-flag-gated tool inclusion, and provides filtering functions for capability-based tool selection. |
+| `commands.ts` | — | Slash command definitions. Maps `/command` strings to handler functions. Includes both visible commands and hidden stubs (`/btw`, `/stickers`, `/thinkback`, `/effort`). |
+| `context.ts` | — | User input context management. Parses and structures user messages before they enter the agent loop. |
+| `cost-tracker.ts` | — | Accumulates API token usage and cost estimates across a session. Exposed via the usage display in the REPL footer. |
+| `setup.ts` | — | First-run setup flow. Handles initial configuration, authentication prompting, and workspace detection on first launch. |
+
+---
+
+## Directory Groups
+
+### `src/bridge/` — Claude Desktop / Remote Bridge
+
+The bridge layer connects Claude Code CLI to external hosts: Claude Desktop, Claude.ai web, and remote container environments.
+
+| File | Description |
+|------|-------------|
+| `bridgeMain.ts` | Session lifecycle manager. Coordinates the full session from creation to teardown, including spawning child processes and relaying messages. Implements connection backoff: 2s → 2min for reconnects, 500ms → 30s for generation retries. |
+| `bridgeApi.ts` | HTTP client for communicating with the bridge host. Handles authentication headers and response parsing. |
+| `bridgeConfig.ts` | Connection configuration. Stores host URL, port, and authentication parameters. |
+| `bridgeMessaging.ts` | Message relay between the CLI process and the bridge host. Translates internal message formats to the bridge protocol. |
+| `sessionRunner.ts` | Process spawning for bridge-managed sessions. Forks the Claude Code CLI as a child process controlled by the bridge. |
+| `jwtUtils.ts` | JWT token refresh scheduler. Proactively refreshes authentication tokens before they expire. |
+| `workSecret.ts` | Work secret (auth token) management. Generates and exchanges ephemeral secrets used for bridge session authentication. |
+| `capacityWake.ts` | Capacity-based wakeup logic. Resumes idle sessions when capacity becomes available. |
+
+### `src/cli/` — CLI Infrastructure
+
+| Directory | Description |
+|-----------|-------------|
+| `handlers/` | Command-line argument handlers. Processes flags like `--continue`, `--resume`, `--fork-session`, `--print`, and `--output-format`. |
+| `transports/` | I/O transport implementations. `stdio` transport for standard piped usage; `structured` transport for JSON-line output mode used by SDK consumers. |
+
+### `src/commands/` — Slash Commands (~80 total)
+
+The `commands/` directory contains implementations for all slash commands available in the REPL. Commands are organized by domain:
+
+| Subdirectory | Commands |
+|---|---|
+| `agents/` | Agent spawning, listing, and management commands |
+| `compact/` | `/compact` — manual context compaction trigger |
+| `config/` | `/config` — read and write settings |
+| `help/` | `/help` — display available commands |
+| `login/` | `/login`, `/logout` — authentication flows |
+| `mcp/` | `/mcp` — MCP server management (add, remove, list, status) |
+| `memory/` | `/memory` — memory system management |
+| `plan/` | `/plan` — enter plan mode |
+| `resume/` | `/resume` — resume a previous session |
+| `review/` | `/review` — initiate a code review workflow |
+| *(70+ more)* | `/btw`, `/stickers`, `/thinkback`, `/effort`, `/good-claude`, `/bughunter`, and others |
+
+<Note>
+  Several commands are hidden stubs not shown in `/help`: `/btw` (ask side questions without interrupting the main task), `/stickers` (opens the sticker ordering page in a browser), `/thinkback` (2025 Year in Review), and `/effort` (set model effort/thinking level).
+</Note>
+
+### `src/components/` — React/Ink Terminal UI
+
+Claude Code uses [Ink](https://github.com/vadimdemedes/ink) to render React components in the terminal. The `components/` directory contains all UI primitives and screen-level components.
+
+| Subdirectory / File | Description |
+|---|---|
+| `design-system/` | Reusable UI primitives: colors, borders, layout containers, text styles. The foundational component library for the terminal UI. |
+| `messages/` | Message rendering components. Handles markdown rendering, code block formatting, tool use display, and tool result display in the conversation view. |
+| `permissions/` | Permission dialog components. Renders the interactive Allow Once / Allow Always / Deny prompt when a tool requires authorization. |
+| `PromptInput/` | The main input field component. Includes autocomplete suggestions, slash command completion, and history navigation. |
+| `LogoV2/` | Branding and welcome screen. Displays the Claude Code logo and version information on startup. |
+| `Settings/` | Settings panel UI. Renders configuration screens accessible via `/config`. |
+| `Spinner.tsx` | Loading indicator component. Used during API calls, tool execution, and compaction. |
+| *(40+ more groups)* | Additional components for cost display, session info, tool progress, notifications, etc. |
+
+### `src/entrypoints/` — Application Entry Points
+
+| File / Directory | Description |
+|---|---|
+| `cli.tsx` | The main CLI entry point. Parses top-level flags (`--version`, `--help`, `--dangerously-skip-permissions`), initializes logging, and routes to either interactive REPL mode or headless/SDK mode. |
+| `sdk/` | Agent SDK entry point. Exposes the `QueryEngine` as a programmatic API with TypeScript types for external consumers. Includes session management utilities. |
+| `mcp.ts` | MCP server entry point. Starts Claude Code as an MCP server, exposing its tools and resources to MCP clients (e.g., Claude Desktop). |
+
+### `src/hooks/` — React Hooks
+
+| File / Directory | Description |
+|---|---|
+| `useCanUseTool.tsx` | Permission checking hook. Evaluates whether a tool call is currently permitted given the active `PermissionMode`, allow/deny rules, and session state. Used by the UI to show or hide permission prompts. |
+| `useReplBridge.tsx` | Bridge connection hook. Manages the WebSocket or HTTP connection to the bridge host in bridge-mode sessions. |
+| `notifs/` | Notification hooks. Subscribe to system notifications (task completion, agent messages, capacity alerts) and surface them in the REPL. |
+| `toolPermission/` | Tool permission handler hooks. Implements the interactive allow/deny flow, including persisting "Allow Always" decisions to settings. |
+
+### `src/services/` — Business Logic Layer
+
+The `services/` directory contains the core business logic that sits between the agent loop and external systems.
+
+| Subdirectory | Key Files | Description |
+|---|---|---|
+| `api/` | `claude.ts`, `errors.ts`, `withRetry.ts` | Claude API client. `claude.ts` makes streaming POST requests to `/v1/messages`. `withRetry.ts` implements exponential backoff for transient errors. `errors.ts` categorizes API errors for recovery decisions. |
+| `analytics/` | — | Telemetry and GrowthBook integration. Two analytics sinks (1st-party and Datadog). Sends environment fingerprints, process metrics, and tool usage events. GrowthBook flag evaluation for runtime A/B gating. |
+| `compact/` | — | Context compression service. Implements three compression strategies: `autoCompact` (summarization via API call), `snipCompact` (zombie message removal), and `contextCollapse` (restructuring). |
+| `mcp/` | `MCPConnectionManager.tsx` | MCP server connection management. Handles server discovery, client lifecycle (connect → initialize → list tools → disconnect), OAuth authentication, and tool registration under `mcp__<server>__<tool>` naming. |
+| `tools/` | `StreamingToolExecutor.ts`, `toolOrchestration.ts` | Tool execution engine. `StreamingToolExecutor.ts` partitions tools into concurrent-safe and serial groups, executes concurrent tools in parallel, and sequences serial tools. `toolOrchestration.ts` manages the batch orchestration layer. |
+| `plugins/` | — | Plugin loader. Discovers and loads external tool plugins from configured plugin directories. |
+| `settingsSync/` | — | Cross-device settings synchronization. Syncs user settings across sessions and devices via the Anthropic backend. |
+
+### `src/state/` — Application State
+
+| File | Description |
+|------|-------------|
+| `AppStateStore.ts` | Store definition. Defines the `AppState` shape: `toolPermissionContext` (mode, rules), `fileHistory` (undo snapshots), `attribution` (commit tracking), `verbose`, `mainLoopModel`, `fastMode`, and `speculation`. |
+| `AppState.tsx` | React context provider and hooks. `AppStateProvider` creates the store via `createContext`. `useAppState(selector)` enables selector-based subscriptions. `useSetAppState()` provides an immer-style updater function. |
+
+### `src/tasks/` — Task Implementations
+
+Each task type corresponds to a different execution context for work the agent delegates:
+
+| Directory | Task Type ID | Description |
+|---|---|---|
+| `LocalShellTask/` | `b` (bash) | Bash command execution. Runs shell commands in the local environment, with streaming stdout/stderr. Implements `DreamTask` background execution via daemon threads. |
+| `LocalAgentTask/` | `a` (agent) | Sub-agent execution in the same process. The agent gets a fresh `messages[]` array but shares the file cache and process environment. |
+| `RemoteAgentTask/` | `r` (remote) | Remote agent execution via the bridge layer. The agent runs in a remote container or Claude Desktop instance. Fully isolated from the local process. |
+| `InProcessTeammateTask/` | `t` (team) | In-process teammate with an async mailbox. Persistent within a session; communicates via `SendMessageTool`. Shares process state but has an isolated `AsyncLocalStorage` context. |
+| `DreamTask/` | — | Background memory consolidation. Runs autonomously during idle time when `tengu_onyx_plover` GrowthBook flag is enabled. Consolidates `memdir/` entries and updates persistent memory. |
+
+### `src/tools/` — Tool Implementations (40+)
+
+Each tool lives in its own subdirectory with a consistent structure: the tool class, input/output type definitions, rendering components, and tests.
+
+| Directory | Description |
+|---|---|
+| `AgentTool/` | Sub-agent spawning. Supports `default`, `fork`, `worktree`, and `remote` spawn modes. Fork mode creates a child process with shared file cache but fresh `messages[]`. Worktree mode additionally isolates the git working directory. |
+| `BashTool/` | Shell command execution. Full bash environment with streaming output, configurable timeout, and sandbox runtime adapter. The most permission-sensitive tool. |
+| `FileReadTool/` | File reading with multi-format support: text, PDF, images, binary. Supports `offset` and `limit` parameters for paginating large files. |
+| `FileEditTool/` | String-replace file editing. Requires exact `oldString` match. Fails on ambiguous matches (multiple occurrences) with an error asking for more context. |
+| `FileWriteTool/` | Full file creation and overwrite. Used for new file scaffolding or complete rewrites. |
+| `GlobTool/` | File pattern matching. Wraps the `glob` package; returns paths sorted by modification time. |
+| `GrepTool/` | Content search via ripgrep. Full regex support with `include` file-type filtering. Returns file paths and line numbers. |
+| `WebFetchTool/` | HTTP content fetching with markdown conversion. Follows redirects; upgrades HTTP to HTTPS. |
+| `WebSearchTool/` | Web search with structured result output (title, URL, snippet). |
+| `MCPTool/` | Dynamic MCP tool wrapper. Schema loaded at runtime from the connected MCP server. Tool name follows `mcp__<server>__<tool>` convention. |
+| `SkillTool/` | Skill document loader. Fetches skills from `memdir/` by name and injects them via `tool_result` rather than the system prompt, preserving context window space. |
+| `AskUserQuestionTool/` | Blocking user prompt. Pauses the agent loop and surfaces a question to the user. Uses `interruptBehavior: block`. |
+| *(30+ more)* | `AgentTool`, `SendMessageTool`, `TeamCreateTool`, `TaskCreateTool`, `TodoWriteTool`, `EnterPlanModeTool`, `MCPTool`, `ConfigTool`, `SleepTool`, and all unreleased tools gated by feature flags. |
+
+### `src/types/` — Type Definitions
+
+| File | Description |
+|------|-------------|
+| `message.ts` | Message discriminated unions. Defines the `Message` type with variants: `user`, `assistant`, `tool_use`, `tool_result`, `progress`, `system`. Used throughout the agent loop for type-safe message handling. |
+| `permissions.ts` | Permission types. Defines `PermissionMode`, `ToolPermissionRule`, and the `ToolPermissionContext` shape stored in `AppState`. |
+| `tools.ts` | Tool progress types. Defines the `ToolProgress` discriminated union used by `renderToolUseProgressMessage()` to display real-time tool status. |
+| `ids.ts` | Branded ID types. Uses TypeScript's type branding pattern to prevent mixing of session IDs, task IDs, agent IDs, and other string identifiers. |
+
+### `src/utils/` — Utilities (Largest Directory)
+
+The `utils/` directory is the largest in the codebase, containing 30+ utility groups spanning all layers of the application.
+
+| Subdirectory | Description |
+|---|---|
+| `permissions/` | Permission rule engine. Evaluates `alwaysAllowRules`, `alwaysDenyRules`, and `alwaysAskRules` against tool names and input patterns. |
+| `messages/` | Message formatting utilities. Normalizes messages for the Claude API (`normalizeMessagesForAPI()`), strips UI-only fields, and handles the `compact_boundary` marker. |
+| `model/` | Model selection logic. Resolves the active model from settings, CLI flags, and remote overrides. Handles codename migrations (e.g., `fennec-latest` → `opus`). |
+| `settings/` | Settings management. Reads and writes `~/.claude/settings.json` and project-level `.claude/settings.json`. Merges layers (global → project → session). |
+| `sandbox/` | Sandbox runtime adapter. Abstracts OS-level sandboxing (macOS sandbox profiles, Linux namespaces) for `BashTool` execution. |
+| `hooks/` | Hook execution utilities. Runs `preToolUse` and `postToolUse` shell hooks defined in settings. Can approve, deny, or modify tool inputs. |
+| `memory/` | Memory system utilities. Manages `memdir/` — the persistent, lazy-loaded knowledge directory. Handles reading, writing, and indexing memory files. |
+| `git/` | Git operation utilities. Wraps common git commands for attribution tracking, worktree management, and commit metadata. |
+| `github/` | GitHub API client utilities. Used by `SubscribePRTool` (KAIROS) and review workflows. |
+| `bash/` | Bash execution helpers. Command sanitization, shell escaping, and output parsing utilities shared by `BashTool` and related tools. |
+| `swarm/` | Multi-agent swarm utilities. Supports the coordinator mode task board: idle scanning, task claiming, and swarm lifecycle management. |
+| `telemetry/` | Telemetry reporting. Formats and dispatches analytics events to the two configured sinks (1st-party and Datadog). Includes the `OTEL_LOG_TOOL_DETAILS=1` environment variable hook for full tool input capture. |
+| *(30+ more)* | `undercover/`, `cost/`, `compact/`, `lsp/`, `oauth/`, `sessionLog/`, `toml/`, `vendor/`, and others. |
+
+### `src/vendor/` — Native Module Source Stubs
+
+The `vendor/` directory contains source stubs for native Node.js addons (`.node` files) that are compiled separately and bundled with the distributed binary.
+
+| Directory | Description |
+|---|---|
+| `audio-capture-src/` | Native audio capture addon. Used by the `VOICE_MODE` feature — captures microphone input for push-to-talk voice mode. |
+| `image-processor-src/` | Native image processing addon. Handles image format conversion and preprocessing for `FileReadTool`'s image support. |
+| `modifiers-napi-src/` | Native keyboard modifier detection. Detects held modifier keys (e.g., for hold-to-talk voice input). |
+| `url-handler-src/` | Native URL scheme handler. Registers the `claude://` URL scheme on macOS for OAuth callback handling and external link routing. |
+
+<Warning>
+  The native addons in `vendor/` are compiled for specific platforms and architectures. They are included as pre-built `.node` binaries in the distributed package. The source stubs here are for documentation purposes; building from source requires platform-specific toolchains (Xcode on macOS, build-essential on Linux).
+</Warning>

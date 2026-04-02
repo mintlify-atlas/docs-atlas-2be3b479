@@ -1,0 +1,143 @@
+---
+title: "Undercover Mode"
+description: How official Anthropic employees hide AI authorship when contributing to public repos
+---
+
+<Note>
+  This page is based on publicly available source analysis and community research on Claude Code v2.1.88. It is not derived from official Anthropic documentation.
+</Note>
+
+## What is undercover mode?
+
+Undercover mode is a behavior system that activates when official Anthropic employees use Claude Code to contribute to external or open-source repositories. When active, it instructs the model to present its contributions as if written by a human developer — suppressing all AI attribution, model names, and internal terminology.
+
+The primary stated purpose is preventing accidental leakage of internal secrets: unreleased model codenames, version numbers, and infrastructure details that could reveal competitive information.
+
+Source: `src/utils/undercover.ts`
+
+## Activation logic
+
+```typescript
+// src/utils/undercover.ts:28-37
+export function isUndercover(): boolean {
+  if (process.env.USER_TYPE === 'ant') {
+    if (isEnvTruthy(process.env.CLAUDE_CODE_UNDERCOVER)) return true
+    // Auto: active unless positively confirmed internal repo
+    return getRepoClassCached() !== 'internal'
+  }
+  return false
+}
+```
+
+Key properties of this function:
+
+| Property | Behavior |
+|----------|----------|
+| Scope | Internal employees only (`USER_TYPE === 'ant'`) |
+| Default state | **ON** — active in all repos unless confirmed internal |
+| Force-off | **Does not exist** — see warning below |
+| External builds | Dead-code-eliminated by the bundler; never ships to users |
+
+<Warning>
+  There is no force-OFF for undercover mode. The source code explicitly states: "There is NO force-OFF. This guards against model codename leaks." An Anthropic employee using Claude Code to contribute to any public or open-source repository cannot disable this behavior.
+</Warning>
+
+## The prompt given to the model
+
+When undercover mode is active, the following instructions are injected into the system prompt (`src/utils/undercover.ts:39-69`):
+
+```typescript
+export function getUndercoverInstructions(): string {
+  return `## UNDERCOVER MODE — CRITICAL
+
+You are operating UNDERCOVER in a PUBLIC/OPEN-SOURCE repository. Your commit
+messages, PR titles, and PR bodies MUST NOT contain ANY Anthropic-internal
+information. Do not blow your cover.
+
+NEVER include in commit messages or PR descriptions:
+- Internal model codenames (animal names like Capybara, Tengu, etc.)
+- Unreleased model version numbers (e.g., opus-4-7, sonnet-4-8)
+- Internal repo or project names (e.g., claude-cli-internal, anthropics/…)
+- Internal tooling, Slack channels, or short links (e.g., go/cc, #claude-code-…)
+- The phrase "Claude Code" or any mention that you are an AI
+- Any hint of what model or version you are
+- Co-Authored-By lines or any other attribution
+
+Write commit messages as a human developer would — describe only what the code
+change does.
+
+GOOD:
+- "Fix race condition in file watcher initialization"
+- "Add support for custom key bindings"
+
+BAD (never write these):
+- "Fix bug found while testing with Claude Capybara"
+- "1-shotted by claude-opus-4-6"
+- "Generated with Claude Code"
+- "Co-Authored-By: Claude Opus 4.6 <…>"`
+}
+```
+
+The phrase "Do not blow your cover" frames the AI as an undercover operative with an active deception objective.
+
+## Attribution system
+
+The attribution system complements undercover mode with an additional layer of codename masking.
+
+When an unrecognized model name is encountered in external repositories, it falls back to a safe display name (`src/utils/attribution.ts:70-72`):
+
+```typescript
+// @[MODEL LAUNCH]: Update the hardcoded fallback model name below
+// (guards against codename leaks).
+// For external repos, fall back to "Claude Opus 4.6" for unrecognized models.
+```
+
+Model codenames in attribution strings are also masked by truncating and starring characters after the first three (`src/utils/model/model.ts:386-392`):
+
+```typescript
+function maskModelCodename(baseName: string): string {
+  // e.g. capybara-v2-fast → cap*****-v2-fast
+  const [codename = '', ...rest] = baseName.split('-')
+  const masked = codename.slice(0, 3) + '*'.repeat(Math.max(0, codename.length - 3))
+  return [masked, ...rest].join('-')
+}
+```
+
+So `capybara-v2-fast` becomes `cap*****-v2-fast` in any externally visible context.
+
+## Implications for open source
+
+When an Anthropic employee uses Claude Code to contribute to a public repository under undercover mode:
+
+1. Code written by the AI appears in commits with no AI attribution
+2. No `Co-Authored-By: Claude` trailer is added to commit messages
+3. No "Generated with Claude Code" marker appears anywhere
+4. The commit message reads as if a human developer wrote it
+5. Repository maintainers and the open-source community have no way to identify that the contribution was AI-generated
+
+## Official protection vs ethical concerns
+
+**Official protection purpose:**
+- Preventing accidental leaks of internal model codenames (competitive intelligence)
+- Preventing leaks of unreleased version numbers (market timing)
+- Preventing exposure of internal infrastructure details (security)
+
+<Accordion title="Ethical considerations">
+  The undercover mode system raises several ethical questions that go beyond the stated technical rationale:
+
+  **Transparency in open source**
+
+  Many open-source projects have adopted or are developing norms around AI-generated contributions. DCO (Developer Certificate of Origin) and similar contribution agreements assume human authorship. Undercover mode systematically prevents disclosure that would allow maintainers to apply their own AI contribution policies.
+
+  **"Do not blow your cover"**
+
+  The explicit framing of concealment as "cover" — language borrowed from intelligence tradecraft — signals that this is an intentional deception system, not merely an incidental side effect of protecting internal secrets. The model is instructed to actively maintain a false identity.
+
+  **The scope problem**
+
+  The ban on `Co-Authored-By` lines and any mention of AI authorship goes further than protecting codenames. It prohibits any acknowledgment of AI involvement, even using generic language that would reveal no internal details ("This commit was AI-assisted" would also be forbidden under the current prompt).
+
+  **No user recourse**
+
+  Because there is no force-off, an employee who wants to be transparent about AI authorship in a public project has no mechanism to override this system within Claude Code.
+</Accordion>

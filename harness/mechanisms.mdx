@@ -1,0 +1,375 @@
+---
+title: "All 12 Mechanisms Explained"
+description: Detailed breakdown of each of the 12 progressive harness mechanisms in Claude Code's production architecture
+---
+
+Each mechanism below solves a specific problem that emerges as an agent system grows. They are presented in dependency order: later mechanisms assume earlier ones are in place.
+
+<Tip>
+  Read these in sequence the first time. On return visits, jump directly to the mechanism you need — each section is self-contained.
+</Tip>
+
+## The 12 mechanisms in sequence
+
+<Steps>
+  <Step title="s01 — The Loop">
+    **Principle:** One loop & Bash is all you need.
+
+    **Key source:** `query.ts`
+
+    **Problem it solves:** How does an agent keep working until a task is done, rather than answering once and stopping?
+
+    The entire agent loop is a `while (true)` cycle in `query.ts`. On each iteration:
+
+    1. Call the Claude API with the current `messages[]`
+    2. Stream the response and collect content blocks
+    3. Check `stop_reason`
+    4. If `stop_reason === "tool_use"`, execute the requested tools and append `tool_result` blocks to `messages[]`, then loop back
+    5. If `stop_reason === "end_turn"`, yield the final result to the consumer
+
+    Nothing else is required for a functional agent. The loop is the entire runtime. Every mechanism that follows is an extension of — not a replacement for — this loop.
+
+    ```typescript
+    // Conceptual shape of query.ts
+    while (true) {
+      const response = await callClaudeAPI(messages)
+      if (response.stop_reason !== "tool_use") {
+        return response
+      }
+      const results = await executeTools(response.tool_use_blocks)
+      messages.push(...results)
+    }
+    ```
+
+    <Note>
+      `query.ts` is the largest file in the codebase at ~785KB. Its size reflects not complexity of the loop itself, but the density of production concerns layered on top of it.
+    </Note>
+  </Step>
+
+  <Step title="s02 — Tool Dispatch">
+    **Principle:** Adding a tool = adding one handler.
+
+    **Key sources:** `Tool.ts`, `tools.ts`
+
+    **Problem it solves:** How do you add new capabilities to the agent without touching the loop?
+
+    `Tool.ts` defines the `Tool<Input, Output, Progress>` interface. Every tool implements the same contract:
+
+    - `validateInput()` — reject bad arguments before any side effects
+    - `checkPermissions()` — tool-specific authorization logic
+    - `call()` — execute and return a result
+    - `isEnabled()`, `isConcurrencySafe()`, `isReadOnly()`, `isDestructive()` — capability flags the loop uses to schedule and gate execution
+
+    `tools.ts` maintains the dispatch map: a registry of all available tools keyed by name. When the Claude API returns a `tool_use` block, the loop looks up the handler by name, validates input, checks permissions, and calls it.
+
+    The `buildTool()` factory provides safe defaults for all capability flags, so new tools only need to specify what they actually do differently. Adding a new tool means writing one handler and registering it — the loop stays identical.
+
+    ```typescript
+    // Tool registration pattern
+    const myTool = buildTool({
+      name: "my_tool",
+      description: "...",
+      inputSchema: z.object({ ... }),
+      async call(input) { ... }
+    })
+    ```
+
+    Tools in the registry span 40+ built-in implementations across file operations, search, execution, web access, agent spawning, planning, and MCP protocol wrapping.
+  </Step>
+
+  <Step title="s03 — Planning">
+    **Principle:** An agent without a plan drifts.
+
+    **Key sources:** `EnterPlanModeTool`, `ExitPlanModeTool`, `TodoWriteTool`
+
+    **Problem it solves:** How do you prevent an agent from taking irreversible actions before it has thought through the full task?
+
+    Planning mode is a permission mode change. When `EnterPlanModeTool` is called, the agent's permission context switches to `plan` mode. In this mode, side-effecting tools are blocked — the agent can only read, reason, and write to its todo list.
+
+    `TodoWriteTool` lets the agent maintain a structured list of steps with statuses (`pending`, `in_progress`, `completed`). The agent works through the list in order.
+
+    `ExitPlanModeTool` restores the normal permission mode when the agent is ready to execute.
+
+    This two-phase structure — plan first, then execute — dramatically improves completion rate on multi-step tasks. An agent that lists its steps before acting is far less likely to get lost partway through or make a destructive move based on a misunderstanding.
+
+    ```text
+    Plan mode active:
+      ✓ FileReadTool     (read-only, allowed)
+      ✓ GlobTool         (read-only, allowed)
+      ✓ TodoWriteTool    (planning tool, allowed)
+      ✗ BashTool         (side-effecting, blocked)
+      ✗ FileEditTool     (side-effecting, blocked)
+
+    Execute mode active:
+      ✓ All tools subject to normal permission rules
+    ```
+
+    <Info>
+      Planning mode is also accessible via the `/plan` slash command, which toggles the mode interactively from the REPL.
+    </Info>
+  </Step>
+
+  <Step title="s04 — Sub-agents">
+    **Principle:** Break big tasks; clean context per subtask.
+
+    **Key sources:** `AgentTool`, `forkSubagent.ts`
+
+    **Problem it solves:** How do you handle tasks that are too large for a single conversation context, or that benefit from parallel execution?
+
+    `AgentTool` is a tool the main agent can call to spawn a child agent with a specific prompt and tool set. `forkSubagent.ts` handles the actual spawning: each child agent gets a **fresh `messages[]` array**, completely isolated from the parent's conversation history.
+
+    This isolation is the key property. The child agent works in a clean context, cannot pollute the parent's history with its intermediate reasoning, and can be given a tightly scoped tool set appropriate to its subtask.
+
+    Sub-agents support multiple spawn modes:
+
+    | Mode | Description |
+    |------|-------------|
+    | `default` | In-process, shares conversation state |
+    | `fork` | Child process, fresh `messages[]`, shared file cache |
+    | `worktree` | Isolated git worktree + fork |
+    | `remote` | Bridge to Claude Code Remote or container |
+
+    The main agent can spawn multiple sub-agents and collect their results, effectively parallelizing independent portions of a task without any one sub-agent's context bleeding into another.
+  </Step>
+
+  <Step title="s05 — Knowledge on demand">
+    **Principle:** Load knowledge when you need it.
+
+    **Key sources:** `SkillTool`, `memdir/`
+
+    **Problem it solves:** How do you give the agent access to large bodies of domain knowledge without pre-loading everything into the system prompt and exhausting the context window before work begins?
+
+    Two mechanisms work together here:
+
+    **Skills** (`SkillTool` + `memdir/`): Skills are self-contained knowledge packages stored on disk. When the agent calls `SkillTool` with a skill name, the skill's content is injected into the conversation as a `tool_result` — not into the system prompt. This means knowledge is loaded on demand, only when the agent decides it's relevant, and counts against the conversation history rather than the fixed system prompt budget.
+
+    **CLAUDE.md files**: Memory files are loaded lazily on a per-directory basis. When the agent enters a directory, the relevant `CLAUDE.md` is fetched and provided as context. This lets teams encode repository-specific conventions, architecture notes, and project context that the agent discovers as it navigates the filesystem rather than receiving upfront.
+
+    ```text
+    System prompt:   [tools] [permissions] [base instructions]
+                     ← fixed, loaded once
+
+    Conversation:    [user] [assistant] [tool_use: SkillTool("mintlify")]
+                     [tool_result: <full skill content injected here>]
+                     ← dynamic, loaded on demand
+    ```
+
+    <Tip>
+      This pattern — inject via `tool_result`, not system prompt — is directly applicable to any agent system. It keeps the system prompt lean and lets the agent reason about when it needs additional knowledge.
+    </Tip>
+  </Step>
+
+  <Step title="s06 — Context compression">
+    **Principle:** Context fills up; make room.
+
+    **Key sources:** `services/compact/`
+
+    **Problem it solves:** How do you run long sessions — spanning hours, hundreds of tool calls, and thousands of tokens — without hitting the context window limit and losing state?
+
+    Claude Code implements a three-layer compression strategy:
+
+    **`autoCompact`** — Triggered automatically when the token count approaches the threshold. Sends the older portion of `messages[]` to the Claude API with a summarization prompt, then replaces those messages with a compact summary. A `compact_boundary` marker is inserted so the loop can distinguish summarized history from full-fidelity recent messages.
+
+    **`snipCompact`** — Controlled by the `HISTORY_SNIP` feature flag. Removes zombie messages and stale markers that accumulate over long sessions without contributing useful context. More aggressive than autoCompact; does not require an API call.
+
+    **`contextCollapse`** — Controlled by the `CONTEXT_COLLAPSE` feature flag. Restructures the entire context for efficiency, collapsing redundant patterns across the message history.
+
+    ```text
+    CONTEXT WINDOW
+    ══════════════
+    ┌─────────────────────────────────────────────┐
+    │  System Prompt (fixed)                      │
+    │  ─────────────────────────────────────────  │
+    │  [compacted summary of older messages]      │
+    │  [compact_boundary marker]                  │
+    │  ─────────────────────────────────────────  │
+    │  [recent messages — full fidelity]          │
+    │  user → assistant → tool_use → tool_result  │
+    └─────────────────────────────────────────────┘
+    ```
+
+    The compaction flow uses `getMessagesAfterCompactBoundary()` to find the split point, summarizes only the older portion, and stitches the result back together. The recent messages are never compressed — only the historical tail.
+  </Step>
+
+  <Step title="s07 — Persistent tasks">
+    **Principle:** Big goals → small tasks → disk.
+
+    **Key sources:** `TaskCreateTool`, `TaskUpdateTool`, `TaskGetTool`, `TaskListTool`
+
+    **Problem it solves:** How do you track progress on goals that span multiple sessions, agents, and tool calls without relying on conversation history alone?
+
+    The task system provides a file-based task graph with structured status tracking. Tasks are written to disk, not held in memory, which means:
+
+    - They survive session restarts
+    - Multiple agents can read and write the same task board
+    - Progress is queryable independent of any agent's current `messages[]`
+
+    Each task has an ID (a prefixed 8-character string), a goal description, a status (`pending`, `in_progress`, `completed`, `failed`), optional dependencies on other task IDs, and an output field populated when the task completes.
+
+    | Tool | Purpose |
+    |------|---------|
+    | `TaskCreateTool` | Create a new task with a goal and optional dependencies |
+    | `TaskUpdateTool` | Update task status and write output |
+    | `TaskGetTool` | Retrieve a single task by ID |
+    | `TaskListTool` | List all tasks, optionally filtered by status |
+    | `TaskStopTool` | Halt a running task |
+    | `TaskOutputTool` | Read the output of a completed task |
+
+    <Note>
+      Task IDs use type prefixes: `b` for bash tasks, `a` for agent tasks, `r` for remote tasks, `t` for team tasks. This makes the task graph self-describing when you read it from disk.
+    </Note>
+  </Step>
+
+  <Step title="s08 — Background tasks">
+    **Principle:** Slow ops in background; agent keeps thinking.
+
+    **Key sources:** `DreamTask`, `LocalShellTask`
+
+    **Problem it solves:** How do you prevent slow operations — long-running shell commands, test suites, build processes — from blocking the agent's main reasoning loop?
+
+    `LocalShellTask` runs shell commands in daemon threads. The main agent does not wait for the command to finish; it continues processing, handling other tasks or responding to the user. When the command completes, a notification is injected back into the agent's context.
+
+    `DreamTask` is the agent equivalent: a background thinking process that runs independently of the main loop. The agent can offload analysis or planning to a DreamTask and receive the result asynchronously.
+
+    This mechanism makes it practical for agents to kick off operations like:
+
+    - Running a test suite while continuing to read other files
+    - Starting a build in the background while writing documentation
+    - Executing a database migration while preparing the next migration script
+
+    The agent's perceived parallelism increases without any change to the main loop's single-threaded structure.
+  </Step>
+
+  <Step title="s09 — Agent teams">
+    **Principle:** Too big for one → delegate to teammates.
+
+    **Key sources:** `TeamCreateTool`, `TeamDeleteTool`, `InProcessTeammateTask`
+
+    **Problem it solves:** How do you coordinate multiple persistent agents working on different parts of a large goal, rather than spawning disposable sub-agents for each subtask?
+
+    While sub-agents (s04) are ephemeral — spawned for a task, discarded when done — teammates are **persistent**. `TeamCreateTool` creates a named team with a set of teammate agents. Each teammate runs as an `InProcessTeammateTask`: an in-process agent with its own `messages[]` array and an **async mailbox** for receiving messages.
+
+    The lead agent creates the team, assigns initial context to each teammate, and then coordinates via the message protocol. Teammates persist across task boundaries, accumulating their own conversation history and specialization.
+
+    ```text
+    Lead Agent
+      ├── Teammate A  ──> handles frontend tasks
+      │     mailbox: [msg1, msg2, ...]
+      ├── Teammate B  ──> handles backend tasks
+      │     mailbox: [msg1, ...]
+      └── Teammate C  ──> handles testing
+            mailbox: [msg1, msg2, msg3, ...]
+
+    Shared: task board, message inbox
+    Isolated: messages[], file cache, working directory
+    ```
+
+    `TeamDeleteTool` tears down the team and releases all resources when the goal is complete.
+  </Step>
+
+  <Step title="s10 — Team protocols">
+    **Principle:** Shared communication rules.
+
+    **Key sources:** `SendMessageTool`
+
+    **Problem it solves:** How do agents in a team negotiate, share information, and coordinate action without a shared memory space?
+
+    `SendMessageTool` implements a single request-response pattern that drives all inter-agent communication. Any agent — lead or teammate — can call `SendMessageTool` to send a message to another agent's mailbox and wait for a reply.
+
+    The pattern is intentionally minimal: one message in, one message out. This simplicity is a design choice. More complex protocols (broadcast, pub/sub, streaming) introduce coordination overhead and failure modes. A single synchronous request-response pattern is sufficient for:
+
+    - Task assignment ("here is your subtask")
+    - Status queries ("what have you completed?")
+    - Result collection ("send me your output")
+    - Clarification ("I need more context on X")
+
+    All negotiation between agents — including the autonomous task-claiming protocol used by the coordinator — is built on top of this one primitive.
+
+    <Info>
+      The request-response pattern maps directly to the Claude API's own message structure. An agent receiving a message processes it as a new turn in its own conversation, produces a response, and that response becomes the `tool_result` seen by the sending agent.
+    </Info>
+  </Step>
+
+  <Step title="s11 — Autonomous agents">
+    **Principle:** Teammates scan and claim tasks themselves.
+
+    **Key sources:** `coordinator/coordinatorMode.ts`
+
+    **Problem it solves:** How do you scale a team beyond the lead agent's ability to manually assign every task?
+
+    In standard team operation, the lead agent assigns tasks to teammates explicitly. This works for small teams and well-structured goals. It breaks down when the task graph is large, dynamic, or when tasks complete at unpredictable rates.
+
+    `coordinatorMode.ts` implements an **idle cycle + auto-claim** pattern. Teammate agents in coordinator mode:
+
+    1. Check the task board for unclaimed tasks matching their capabilities
+    2. Atomically claim an available task (setting its status to `in_progress` with their agent ID)
+    3. Execute the task
+    4. Mark it complete and write output
+    5. Return to step 1
+
+    The lead agent's role shifts from task dispatcher to goal setter and team manager. It creates the task graph and the team; the team self-organizes to execute it.
+
+    This is the mechanism that enables the swarm pattern visible in Claude Code's architecture:
+
+    ```text
+    SWARM MODE
+    ══════════
+    Lead: creates tasks, monitors progress
+      ├── Teammate A ──> scans → claims Task 1 → executes → done
+      ├── Teammate B ──> scans → claims Task 2 → executes → done
+      └── Teammate C ──> scans → claims Task 3 → executes → done
+    ```
+
+    The feature is gated behind the `COORDINATOR_MODE` feature flag, indicating it is production-capable but selectively enabled.
+  </Step>
+
+  <Step title="s12 — Worktree isolation">
+    **Principle:** Each works in its own directory.
+
+    **Key sources:** `EnterWorktreeTool`, `ExitWorktreeTool`
+
+    **Problem it solves:** How do you prevent multiple agents working on the same repository from stepping on each other's file changes?
+
+    When multiple agents work in the same git repository simultaneously, file conflicts are inevitable unless each agent has its own working copy. `EnterWorktreeTool` creates a git worktree — a separate checkout of the repository in a new directory — and binds it to a task ID. `ExitWorktreeTool` tears it down when the task is complete.
+
+    The binding between task ID and worktree ID is the key: tasks manage goals, worktrees manage directories, and the one-to-one correspondence means you can always find an agent's working state by looking up its task.
+
+    ```text
+    Repository (main)
+      ├── worktree/task-a8f2b3c1/   ← Teammate A's isolated checkout
+      ├── worktree/task-d4e7f1a2/   ← Teammate B's isolated checkout
+      └── worktree/task-c9b5e6d3/   ← Teammate C's isolated checkout
+
+    Each agent reads and writes only its own worktree.
+    Merges happen at the task boundary, not mid-execution.
+    ```
+
+    Combined with the full mechanism stack — autonomous agents (s11) claiming tasks (s07) with isolated worktrees (s12), communicating via the message protocol (s10) — this is the complete picture of how Claude Code runs parallel agent teams on real codebases.
+
+    <Warning>
+      Worktree isolation prevents file conflicts but does not prevent logical conflicts: two agents modifying the same logical component in different worktrees can still produce incompatible changes. Resolution is the lead agent's responsibility at merge time.
+    </Warning>
+  </Step>
+</Steps>
+
+## Key design patterns
+
+The 12 mechanisms are implemented using a consistent set of design patterns. Recognizing these patterns helps you understand why the code is structured the way it is and how to extend it.
+
+| Pattern | Where used | Purpose |
+|---------|-----------|---------|
+| **AsyncGenerator streaming** | `QueryEngine`, `query()` | Full-chain streaming from Claude API to consumer without buffering |
+| **Builder + Factory** | `buildTool()` in `Tool.ts` | Safe defaults for all tool capability flags; new tools override only what differs |
+| **Branded Types** | `SystemPrompt`, `asSystemPrompt()` | Prevent string/array type confusion at compile time |
+| **Feature Flags + DCE** | `feature()` from `bun:bundle` | Compile-time dead code elimination; disabled features produce zero runtime cost |
+| **Discriminated Unions** | `Message` types in `types/message.ts` | Type-safe exhaustive handling of all message variants |
+| **Observer + State Machine** | `StreamingToolExecutor` | Track tool execution lifecycle: pending → running → complete → error |
+| **Snapshot State** | `FileHistoryState` in `AppState` | Undo/redo for file operations without a separate undo stack |
+| **Ring Buffer** | Error log | Bounded memory for long sessions; oldest entries dropped automatically |
+| **Fire-and-Forget Write** | `recordTranscript()` | Non-blocking persistence with an order-preserving queue; user messages block, assistant messages do not |
+| **Lazy Schema** | `lazySchema()` | Defer Zod schema evaluation until first use; avoids startup cost for rarely-used tools |
+| **Context Isolation** | `AsyncLocalStorage` | Per-agent context in a shared process without thread-local storage |
+
+<Note>
+  The Fire-and-Forget Write pattern deserves particular attention. User messages are written with `await` (blocking) to guarantee crash recovery. Assistant messages are written with fire-and-forget to avoid adding latency to every API response. The order-preserving queue ensures the transcript is always consistent even when writes complete out of order.
+</Note>

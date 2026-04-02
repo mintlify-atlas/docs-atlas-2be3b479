@@ -1,0 +1,96 @@
+---
+title: "The 12 Harness Mechanisms"
+description: How Claude Code layers 12 progressive production mechanisms on top of the basic agent loop
+---
+
+Claude Code is built around a minimal agent loop — a `while (true)` cycle that calls the Claude API, checks the stop reason, executes tools, and appends results. That core is simple enough to fit in a diagram. What makes Claude Code a production system is the **harness**: 12 progressive layers wrapped around that loop, each solving a real problem that emerges at scale.
+
+<Info>
+  This section reverse-engineers the harness architecture from publicly available information about Claude Code. The goal is to understand how each mechanism is composed, not just that it exists.
+</Info>
+
+## The minimal agent loop
+
+Everything starts here. Strip away every production concern and you get this:
+
+```text
+                THE CORE LOOP
+                =============
+
+    User --> messages[] --> Claude API --> response
+                                          |
+                                stop_reason == "tool_use"?
+                               /                          \
+                             yes                           no
+                              |                             |
+                        execute tools                    return text
+                        append tool_result
+                        loop back -----------------> messages[]
+
+
+    That is the minimal agent loop. Claude Code wraps this loop
+    with a production-grade harness: permissions, streaming,
+    concurrency, compaction, sub-agents, persistence, and MCP.
+```
+
+The loop lives in `query.ts` — the largest single file in the codebase at ~785KB. Every mechanism described in this section extends or wraps this loop without changing its fundamental shape.
+
+## All 12 mechanisms at a glance
+
+| # | Mechanism | Key files | One-line principle |
+|---|-----------|-----------|-------------------|
+| s01 | **The Loop** | `query.ts` | One loop & Bash is all you need |
+| s02 | **Tool Dispatch** | `Tool.ts`, `tools.ts` | Adding a tool = adding one handler |
+| s03 | **Planning** | `EnterPlanModeTool`, `TodoWriteTool` | An agent without a plan drifts |
+| s04 | **Sub-agents** | `AgentTool`, `forkSubagent.ts` | Break big tasks; clean context per subtask |
+| s05 | **Knowledge on demand** | `SkillTool`, `memdir/` | Load knowledge when you need it |
+| s06 | **Context compression** | `services/compact/` | Context fills up; make room |
+| s07 | **Persistent tasks** | `TaskCreate/Update/Get/List` | Big goals → small tasks → disk |
+| s08 | **Background tasks** | `DreamTask`, `LocalShellTask` | Slow ops in background; agent keeps thinking |
+| s09 | **Agent teams** | `TeamCreate/Delete`, `InProcessTeammateTask` | Too big for one → delegate to teammates |
+| s10 | **Team protocols** | `SendMessageTool` | Shared communication rules |
+| s11 | **Autonomous agents** | `coordinator/coordinatorMode.ts` | Teammates scan and claim tasks themselves |
+| s12 | **Worktree isolation** | `EnterWorktreeTool`, `ExitWorktreeTool` | Each works in its own directory |
+
+## The key insight: each mechanism builds on the previous
+
+The 12 mechanisms are not independent features bolted on to a core. They form a dependency chain: each one solves a problem that only becomes visible once the previous mechanism is in place.
+
+<Note>
+  You cannot meaningfully use sub-agents (s04) without planning (s03). You cannot run agent teams (s09) without a task graph (s07) and a communication protocol (s10). The ordering is not arbitrary — it reflects the actual sequence of problems you encounter as an agent system scales.
+</Note>
+
+The progression moves through four logical categories:
+
+1. **Loop & Dispatch** — establish the foundation: a loop that runs and tools that plug in
+2. **Planning & Decomposition** — give the agent structure and the ability to break work apart
+3. **Knowledge & Context** — manage what the agent knows and how much fits in its window
+4. **Coordination & Autonomy** — scale beyond one agent, one task, one directory
+
+## Mechanism categories
+
+<CardGroup cols={2}>
+  <Card title="Loop & Dispatch (s01–s02)" icon="arrow-rotate-right" href="/harness/mechanisms">
+    The foundational layer: a while-true loop calling the Claude API, and a dispatch map that routes tool calls to handlers. The loop never changes; tools just register themselves.
+  </Card>
+  <Card title="Planning & Decomposition (s03–s04)" icon="list-check" href="/harness/mechanisms">
+    Planning mode forces the agent to enumerate steps before acting, doubling completion rates. Sub-agents fork fresh `messages[]` arrays so complex tasks don't pollute the main context.
+  </Card>
+  <Card title="Knowledge & Context (s05–s06)" icon="brain" href="/harness/mechanisms">
+    Skills inject domain knowledge on demand via `tool_result` rather than bloating the system prompt. Context compression reclaims token budget through summarization, snipping, and collapsing.
+  </Card>
+  <Card title="Coordination & Autonomy (s07–s12)" icon="users" href="/harness/mechanisms">
+    Persistent task graphs, background execution, team creation, agent-to-agent messaging, autonomous task claiming, and worktree isolation — the full multi-agent production stack.
+  </Card>
+</CardGroup>
+
+## What the harness is not
+
+The harness is not a framework you configure. It is the set of mechanisms that Claude Code's own source composes together. Understanding it lets you reason about:
+
+- Why certain operations are fast (streaming, fire-and-forget writes)
+- Why context stays manageable across long sessions (compaction, isolation)
+- How parallel work is coordinated without shared mutable state (task graphs, mailboxes)
+- Where to look when something goes wrong (each mechanism has clear boundaries)
+
+For a detailed breakdown of every mechanism — source files, problem solved, and design rationale — see the next page.

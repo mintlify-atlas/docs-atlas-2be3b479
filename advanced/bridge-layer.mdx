@@ -1,0 +1,133 @@
+---
+title: "Bridge Layer"
+description: "How Claude Code connects to Claude Desktop and remote sessions"
+---
+
+The bridge layer connects Claude Code CLI to external clients — primarily Claude Desktop and web-based cowork sessions. It implements a session lifecycle protocol over HTTP with JWT authentication, allowing a remote client to spawn, control, and communicate with a Claude Code process.
+
+## Architecture
+
+```text
+    Claude Desktop / Web / Cowork          Claude Code CLI
+    ══════════════════════════            ═════════════════
+
+    ┌───────────────────┐                 ┌──────────────────┐
+    │  Bridge Client    │  ←─ HTTP ──→   │  bridgeMain.ts   │
+    │  (Desktop App)    │                 │                  │
+    └───────────────────┘                 │  Session Manager │
+                                          │  ├── spawn CLI   │
+    PROTOCOL:                             │  ├── poll status  │
+    ├─ JWT authentication                 │  ├── relay msgs   │
+    ├─ Work secret exchange               │  └── capacityWake │
+    ├─ Session lifecycle                  │                  │
+    │  ├── create                         │  Backoff:        │
+    │  ├── run                            │  ├─ conn: 2s→2m  │
+    │  └─ stop                            │  └─ gen: 500ms→30s│
+    └─ Token refresh scheduler            └──────────────────┘
+```
+
+## Protocol
+
+### JWT authentication
+
+All bridge API calls are authenticated with JSON Web Tokens (JWTs). The bridge client presents a JWT to establish identity; `bridgeMain.ts` validates the token using `jwtUtils.ts` before processing any request.
+
+Tokens have a finite lifetime. A background **token refresh scheduler** in `bridgeMain.ts` proactively renews tokens before they expire, preventing mid-session authentication failures.
+
+### Work secret exchange
+
+On session creation, a **work secret** is exchanged between the bridge client and `bridgeMain.ts` using `workSecret.ts`. The work secret is a short-lived credential scoped to a single session. Subsequent API calls within that session must present the work secret alongside the JWT, providing a second factor of authentication.
+
+### Session lifecycle
+
+Bridge sessions follow a strict three-phase lifecycle:
+
+<Steps>
+  <Step title="create">
+    The bridge client sends a `create` request with session parameters (model, system prompt overrides, working directory). `bridgeMain.ts` spawns a new Claude Code CLI process via `sessionRunner.ts` and returns a session ID.
+  </Step>
+  <Step title="run">
+    The bridge client sends `run` requests with user messages. `bridgeMain.ts` relays messages to the spawned CLI process and polls the process for status updates and assistant responses. Responses are streamed back to the bridge client.
+  </Step>
+  <Step title="stop">
+    The bridge client sends a `stop` request or the session ends naturally. `bridgeMain.ts` terminates the CLI process and cleans up session state. Partial results are flushed before shutdown.
+  </Step>
+</Steps>
+
+## bridgeMain.ts responsibilities
+
+`bridgeMain.ts` is the central session manager in the bridge layer. It coordinates all other bridge components:
+
+| Responsibility | Details |
+|---------------|---------|
+| Session manager | Creates, tracks, and destroys CLI sessions |
+| Process spawning | Uses `sessionRunner.ts` to fork CLI processes |
+| Message relay | Uses `bridgeMessaging.ts` to route messages between client and CLI |
+| Status polling | Polls spawned CLI processes for progress and completion |
+| Capacity wakeup | Handles `capacityWake` signals when API capacity becomes available |
+| Token refresh | Schedules proactive JWT renewal via `jwtUtils.ts` |
+
+## Backoff strategy
+
+The bridge layer uses two independent exponential backoff strategies:
+
+### Connection backoff
+
+Applied when the initial connection to the bridge API fails (network errors, service unavailability):
+
+```text
+Initial delay:  2 seconds
+Maximum delay:  2 minutes
+Strategy:       Exponential with jitter
+```
+
+### Generation backoff
+
+Applied when a running session fails to produce output (model capacity, transient errors):
+
+```text
+Initial delay:  500 milliseconds
+Maximum delay:  30 seconds
+Strategy:       Exponential with jitter
+```
+
+<Info>
+Generation backoff is intentionally more aggressive (shorter initial delay) than connection backoff, because generation failures are typically transient capacity issues that resolve quickly, while connection failures may indicate infrastructure problems that take longer to recover.
+</Info>
+
+## Capacity wakeup
+
+`capacityWake.ts` implements a capacity-based wakeup mechanism. When a session is waiting for API capacity (e.g., rate limiting), `bridgeMain.ts` registers a capacity listener. When the bridge API signals that capacity is available, the listener wakes the paused session and resumes generation without requiring the client to poll or retry manually.
+
+## Key source files
+
+<Columns cols={2}>
+  <Card title="bridge/bridgeMain.ts" icon="server" href="#">
+    The central session lifecycle manager. Coordinates all other bridge components and owns the session state machine.
+  </Card>
+  <Card title="bridge/bridgeApi.ts" icon="cloud" href="#">
+    HTTP client for bridge API calls. Handles request serialization, response parsing, and HTTP-level error handling.
+  </Card>
+  <Card title="bridge/bridgeConfig.ts" icon="gear" href="#">
+    Connection configuration: API endpoints, timeouts, backoff parameters, and environment-specific settings.
+  </Card>
+  <Card title="bridge/bridgeMessaging.ts" icon="message" href="#">
+    Message relay between the bridge client and the spawned CLI process. Handles serialization and ordering.
+  </Card>
+  <Card title="bridge/sessionRunner.ts" icon="play" href="#">
+    Process spawning logic. Forks CLI processes with the correct arguments and environment for bridge sessions.
+  </Card>
+  <Card title="bridge/jwtUtils.ts" icon="key" href="#">
+    JWT validation and generation. Implements the token refresh scheduler to prevent mid-session expiry.
+  </Card>
+  <Card title="bridge/workSecret.ts" icon="lock" href="#">
+    Work secret generation, exchange, and validation for per-session authentication.
+  </Card>
+  <Card title="bridge/capacityWake.ts" icon="bolt" href="#">
+    Capacity-based wakeup signaling. Resumes waiting sessions when API capacity becomes available.
+  </Card>
+</Columns>
+
+## React integration
+
+The bridge connection is surfaced to the terminal UI through the `useReplBridge` hook (`hooks/useReplBridge.tsx`). This hook manages the bridge client state within the React/Ink component tree, allowing UI components to react to bridge connection status, session state changes, and incoming messages from remote clients.

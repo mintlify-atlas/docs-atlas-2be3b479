@@ -1,122 +1,83 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Learn Coding Agent",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#4F6EF7",
+    "light": "#EEF1FE",
+    "dark": "#1A2560"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/sanbuphy/learn-coding-agent"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/sanbuphy/learn-coding-agent"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Overview",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Introduction",
+            "pages": ["introduction", "architecture-overview"]
+          },
+          {
+            "group": "Core Architecture",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "core/agent-loop",
+              "core/tool-system",
+              "core/permission-system",
+              "core/context-management"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Advanced Systems",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "advanced/multi-agent",
+              "advanced/mcp-integration",
+              "advanced/bridge-layer",
+              "advanced/session-persistence",
+              "advanced/state-management"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "The 12 Harness Mechanisms",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
-            ]
-          },
-          {
-            "group": "AI tools",
-            "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "harness/overview",
+              "harness/mechanisms"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Deep Analysis",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Research Reports",
             "pages": [
-              "api-reference/introduction"
+              "analysis/telemetry-and-privacy",
+              "analysis/hidden-features-and-codenames",
+              "analysis/undercover-mode",
+              "analysis/remote-control-and-killswitches",
+              "analysis/future-roadmap"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Reference",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "reference/tool-inventory",
+              "reference/feature-flags",
+              "reference/directory-structure"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

@@ -1,0 +1,189 @@
+---
+title: "Remote Control & Killswitches"
+description: How Claude Code can be remotely managed, feature-flagged, and force-terminated
+---
+
+<Note>
+  This page is based on publicly available source analysis and community research on Claude Code v2.1.88. It is not derived from official Anthropic documentation.
+</Note>
+
+## Overview
+
+Claude Code implements an extensive remote management infrastructure that allows Anthropic and enterprise administrators to modify client behavior, disable features, override models, and force-terminate sessions — all without user action. The mechanisms range from hourly settings polling to feature flags that can silently change behavior for any user.
+
+## Remote managed settings
+
+### Architecture
+
+Every eligible session periodically fetches configuration from a central endpoint (`src/services/remoteManagedSettings/index.ts:105-107`):
+
+```text
+GET /api/claude_code/settings
+```
+
+### Polling behavior
+
+```typescript
+// src/services/remoteManagedSettings/index.ts:52-54
+const SETTINGS_TIMEOUT_MS = 10000          // 10 second request timeout
+const DEFAULT_MAX_RETRIES = 5              // retry up to 5 times
+const POLLING_INTERVAL_MS = 60 * 60 * 1000 // poll every hour
+```
+
+Settings are fetched once per hour and applied to the running session. The client retries up to 5 times before falling back to cached values.
+
+### Eligibility
+
+| User type | Eligible for remote settings |
+|-----------|------------------------------|
+| Console users (API key) | All |
+| OAuth — Enterprise / C4E | Yes |
+| OAuth — Team | Yes |
+| OAuth — Pro / Max | No |
+
+### Accept-or-die dialog
+
+<Warning>
+  When remote settings contain changes classified as "dangerous," Claude Code shows a blocking dialog. If the user rejects, the application is **forcefully terminated** with exit code 1. There is no option to continue with previous settings.
+</Warning>
+
+```typescript
+// src/services/remoteManagedSettings/securityCheck.tsx:67-73
+export function handleSecurityCheckResult(result: SecurityCheckResult): boolean {
+  if (result === 'rejected') {
+    gracefulShutdownSync(1)  // Exit with code 1 — no recovery
+    return false
+  }
+  return true
+}
+```
+
+The only two outcomes when a security check dialog appears:
+1. **Accept** — new remote settings are applied to the session
+2. **Reject** — `gracefulShutdownSync(1)` is called and Claude Code exits
+
+### Graceful degradation
+
+If the remote settings server is unreachable, the client falls back to a disk cache:
+
+```typescript
+// src/services/remoteManagedSettings/index.ts:433-436
+if (cachedSettings) {
+  logForDebugging('Remote settings: Using stale cache after fetch failure')
+  setSessionCache(cachedSettings)
+  return cachedSettings
+}
+```
+
+Once remote settings have been successfully applied and cached, they continue to enforce even when the server is down.
+
+## Feature flag killswitches
+
+Multiple features can be remotely disabled via GrowthBook feature flags with no user notification.
+
+### Bypass permissions killswitch
+
+```typescript
+// src/utils/permissions/bypassPermissionsKillswitch.ts
+// Checks a Statsig gate to disable bypass permissions
+```
+
+Can disable permission-bypass capabilities for all users simultaneously, without requiring a client update.
+
+### Auto mode circuit breaker
+
+```typescript
+// src/utils/permissions/autoModeState.ts
+// autoModeCircuitBroken state prevents re-entry to auto mode
+```
+
+Auto mode can be remotely disabled by tripping the circuit breaker flag. Once tripped, the session cannot re-enter auto mode.
+
+### Fast mode killswitch
+
+```typescript
+// src/utils/fastMode.ts
+// Fetches from /api/claude_code_penguin_mode
+// Can permanently disable fast mode for a user
+```
+
+Fast mode (penguin mode) is controlled by a dedicated API endpoint and can be permanently disabled for individual users. See [Penguin Mode](#penguin-mode) below.
+
+### Analytics sink killswitch
+
+```typescript
+// src/services/analytics/sinkKillswitch.ts:4
+const SINK_KILLSWITCH_CONFIG_NAME = 'tengu_frond_boric'
+```
+
+The flag `tengu_frond_boric` can remotely stop all analytics output. This allows Anthropic to halt telemetry collection for specific user segments without a client release.
+
+### Agent teams killswitch
+
+```typescript
+// src/utils/agentSwarmsEnabled.ts
+// Requires both env var AND GrowthBook gate 'tengu_amber_flint'
+```
+
+The multi-agent (swarm) feature requires the `tengu_amber_flint` GrowthBook flag to be active. Removing the flag disables the entire agent teams capability.
+
+### Voice mode killswitch
+
+```typescript
+// src/voice/voiceModeEnabled.ts:21
+// 'tengu_amber_quartz_disabled' — emergency off for voice mode
+```
+
+Voice mode has a dedicated emergency killswitch at `tengu_amber_quartz_disabled`. This is independent of the `VOICE_MODE` feature flag that gates the feature initially.
+
+## Model override system
+
+To support canary testing and rapid response to unexpected issues, the model can be dynamically switched for specific user groups:
+
+```typescript
+// src/utils/model/antModels.ts:32-33
+// @[MODEL LAUNCH]: Update tengu_ant_model_override with new ant-only models
+// @[MODEL LAUNCH]: Add the codename to scripts/excluded-strings.txt
+```
+
+The `tengu_ant_model_override` GrowthBook flag can configure:
+
+| Override capability | Description |
+|--------------------|-------------|
+| Default model | Switch which model a user group receives |
+| Default effort level | Set the reasoning effort for the session |
+| System prompt appendage | Append text to the system prompt |
+| Custom model aliases | Define alternative names that resolve to specific models |
+
+This mechanism is primarily used for internal (`ant`) employees but the infrastructure is general-purpose.
+
+## Penguin mode
+
+Fast mode status is controlled by a dedicated endpoint separate from the main settings API:
+
+```typescript
+// src/utils/fastMode.ts
+// GET /api/claude_code_penguin_mode
+// If API indicates disabled, permanently disabled for user
+```
+
+Multiple feature flags also gate fast mode availability:
+
+- `tengu_penguins_off` — primary fast mode killswitch
+- `tengu_marble_sandcastle` — secondary fast mode killswitch
+
+When the API returns disabled, fast mode is **permanently** disabled for that user — it does not re-enable on next session.
+
+## Summary
+
+| Mechanism | Scope | User consent |
+|-----------|-------|-------------|
+| Remote managed settings | Enterprise / Team | Accept or exit |
+| GrowthBook feature flags | All users | None |
+| Feature killswitches | All users | None |
+| Model override | Internal (ant) users | None |
+| Fast mode control | All users | None |
+| Analytics sink killswitch | All users | None |
+| Voice mode killswitch | All users | None |
+
+The remote control infrastructure gives Anthropic and enterprise administrators extensive ability to modify, restrict, and terminate Claude Code behavior for any user at any time. Enterprise administrators can enforce policies that individual users cannot override. Feature flags allow silent behavior changes without client updates or user notification.

@@ -1,0 +1,146 @@
+---
+title: "Session Persistence"
+description: "How sessions are stored and resumed"
+---
+
+Claude Code persists every session to disk as an append-only JSONL log. This enables crash recovery, session resumption, and forking — continuing from any point in a conversation's history without re-running prior work.
+
+## Storage layout
+
+Sessions are stored under the user's home directory:
+
+```text
+SESSION STORAGE
+══════════════
+
+~/.claude/projects/<hash>/sessions/
+└── <session-id>.jsonl           ← append-only log
+    ├── {"type":"user",...}
+    ├── {"type":"assistant",...}
+    ├── {"type":"progress",...}
+    └── {"type":"system","subtype":"compact_boundary",...}
+```
+
+The `<hash>` is a deterministic hash of the project's working directory path. This groups all sessions for the same project together while keeping sessions from different projects isolated.
+
+### JSONL entry types
+
+Each line in the `.jsonl` file is a JSON object with a `type` field:
+
+| Type | Contents | Written |
+|------|----------|---------|
+| `user` | User message content, attachments, context | Before API call (blocking) |
+| `assistant` | Assistant response text, tool calls | After API response (async queue) |
+| `progress` | Intermediate tool results, streaming status | Inline during execution |
+| `compact_boundary` | Marker indicating where context was compacted | After compaction runs |
+
+## Persistence strategy
+
+Different entry types use different write strategies, balancing crash safety against throughput:
+
+```text
+PERSISTENCE STRATEGY:
+├─ User messages  → await write (blocking, for crash recovery)
+├─ Assistant msgs → fire-and-forget (order-preserving queue)
+├─ Progress       → inline write (dedup on next query)
+└─ Flush          → on result yield / cowork eager flush
+```
+
+### User messages: blocking write
+
+User messages are written with `await` before the API call begins. This guarantees that if the process crashes during a long generation, the user's prompt is recoverable. The session can be resumed from after the last user message.
+
+### Assistant messages: fire-and-forget queue
+
+Assistant messages are written to an **order-preserving async queue**. Writes are non-blocking from the agent loop's perspective, but the queue ensures entries are written in the correct order even if individual writes complete out of sequence. This prevents slow disk I/O from stalling the streaming response.
+
+### Progress entries: inline with deduplication
+
+Progress entries (intermediate tool results, status updates) are written inline during tool execution. They are **deduplicated on the next query** — if the same progress state is written multiple times (e.g., due to retries), only the last instance is kept when rebuilding message history.
+
+### Flush behavior
+
+The session log is explicitly flushed at two points:
+- **On result yield** — when the agent loop yields a final result to the consumer
+- **Cowork eager flush** — when running in bridge/cowork mode, flushed more aggressively to keep remote clients in sync
+
+<Warning>
+Because assistant messages are written asynchronously, a hard process kill (SIGKILL) between the API response and the queue flush could result in the assistant's response being missing from the log. User messages are always safe due to the blocking write.
+</Warning>
+
+## Resume flow
+
+```text
+RESUME FLOW:
+getLastSessionLog() ──> parse JSONL ──> rebuild messages[]
+     │
+     ├── --continue     → last session in cwd
+     ├── --resume <id>  → specific session
+     └── --fork-session → new ID, copy history
+```
+
+Three resume modes are available:
+
+<Tabs>
+  <Tab title="--continue">
+    Resumes the **most recent session** associated with the current working directory. Claude Code finds the newest `.jsonl` file under `~/.claude/projects/<hash>/sessions/` and rebuilds `messages[]` from it.
+
+    ```bash
+    claude --continue
+    ```
+
+    Use this to pick up where you left off in a project without needing to remember a session ID.
+  </Tab>
+  <Tab title="--resume &lt;id&gt;">
+    Resumes a **specific session** by ID. This is useful when you have multiple sessions for the same project and want to return to a particular branch of work.
+
+    ```bash
+    claude --resume ses_abc12345
+    ```
+
+    The session ID is printed at the end of every session and available in the session log filenames.
+  </Tab>
+  <Tab title="--fork-session">
+    Creates a **new session** with a fresh ID but copies the history from an existing session. The original session is left unchanged. This is equivalent to branching — you can explore a different direction without overwriting the original conversation.
+
+    ```bash
+    claude --fork-session ses_abc12345
+    ```
+
+    The forked session writes to a new `.jsonl` file; subsequent messages are appended only to the fork.
+  </Tab>
+</Tabs>
+
+## Rebuild process
+
+When resuming, `getLastSessionLog()` parses the JSONL file and reconstructs the in-memory `messages[]` array:
+
+<Steps>
+  <Step title="Locate session log">
+    Find the target `.jsonl` file in `~/.claude/projects/<hash>/sessions/`. For `--continue`, pick the most recently modified file. For `--resume`, look up by session ID.
+  </Step>
+  <Step title="Parse JSONL">
+    Read the file line by line. Each line is parsed as a JSON object. Malformed lines are skipped with a warning.
+  </Step>
+  <Step title="Deduplicate progress entries">
+    Progress entries are deduplicated: if the same tool call ID has multiple progress entries, only the last is retained. This cleans up entries that were written during retried or interrupted operations.
+  </Step>
+  <Step title="Reconstruct messages[]">
+    Entries are assembled into the `messages[]` format expected by the Claude API. The `compact_boundary` marker, if present, is preserved so that the compaction state is correctly restored.
+  </Step>
+  <Step title="Resume agent loop">
+    The reconstructed `messages[]` is passed to `query()`. The agent loop continues from the last state as if the session never ended.
+  </Step>
+</Steps>
+
+## Compact boundary
+
+When context compaction runs, a `compact_boundary` entry is written to the session log. This marker indicates which messages were summarized. On resume, messages before the boundary are treated as already-compacted and are not re-summarized, preserving the compaction state across restarts.
+
+```json
+{"type":"system","subtype":"compact_boundary","timestamp":"...","summary":"..."}
+```
+
+<Tip>
+If a session was compacted before being interrupted, resuming it will correctly restore the compacted state — the summary is included in the JSONL and injected at the boundary position in `messages[]`.
+</Tip>

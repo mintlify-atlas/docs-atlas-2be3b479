@@ -1,0 +1,167 @@
+---
+title: "Permission System"
+description: How tool call authorization flows through hooks, rules, and interactive prompts
+---
+
+Claude Code never executes a tool call blindly. Every tool call passes through a layered permission pipeline before `call()` is invoked. The pipeline is designed so that the most specific, lowest-latency check runs first — rejecting bad inputs before any dialog is shown — and the most expensive checks (interactive prompts) are only reached when no rule already applies.
+
+## Permission flow diagram
+
+```text
+    TOOL CALL REQUEST
+          │
+          ▼
+    ┌─ validateInput() ──────────────────────────────────┐
+    │  reject invalid inputs before any permission check │
+    └────────────────────┬───────────────────────────────┘
+                         │
+                         ▼
+    ┌─ PreToolUse Hooks ─────────────────────────────────┐
+    │  user-defined shell commands (settings.json hooks) │
+    │  can: approve, deny, or modify input               │
+    └────────────────────┬───────────────────────────────┘
+                         │
+                         ▼
+    ┌─ Permission Rules ─────────────────────────────────┐
+    │  alwaysAllowRules:  match tool name/pattern → auto │
+    │  alwaysDenyRules:   match tool name/pattern → deny │
+    │  alwaysAskRules:    match tool name/pattern → ask  │
+    │  Sources: settings, CLI args, session decisions    │
+    └────────────────────┬───────────────────────────────┘
+                         │
+                    no rule match?
+                         │
+                         ▼
+    ┌─ Interactive Prompt ───────────────────────────────┐
+    │  User sees tool name + input                       │
+    │  Options: Allow Once / Allow Always / Deny         │
+    └────────────────────┬───────────────────────────────┘
+                         │
+                         ▼
+    ┌─ checkPermissions() ───────────────────────────────┐
+    │  Tool-specific logic (e.g. path sandboxing)        │
+    └────────────────────┬───────────────────────────────┘
+                         │
+                    APPROVED → tool.call()
+```
+
+## Permission evaluation sequence
+
+<Steps>
+  <Step title="validateInput()">
+    The first gate is schema validation. `validateInput()` runs against the tool's Zod schema before any permission logic executes. If the input is malformed — wrong types, missing required fields, values out of range — the tool call is rejected immediately and a `tool_result` with an error message is returned to Claude.
+
+    This step is intentionally cheap and synchronous. It catches model errors (Claude hallucinating a field name) without touching the permission subsystem at all.
+  </Step>
+  <Step title="PreToolUse hooks">
+    After validation, the hook system runs. PreToolUse hooks are user-defined shell commands configured in `settings.json`. They receive the tool name and input as JSON via stdin and can return one of three decisions:
+
+    - **approve** — short-circuit the rest of the pipeline and allow the call immediately
+    - **deny** — reject the call with a custom error message
+    - **modify** — rewrite the tool input before the call proceeds (e.g., add a `--dry-run` flag to every bash command)
+
+    Hooks are designed for automation scenarios: CI pipelines, sandboxed environments, or policy enforcement that needs to apply without user interaction.
+
+    ```json
+    // settings.json — example PreToolUse hook
+    {
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "BashTool",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "/usr/local/bin/audit-bash-commands"
+              }
+            ]
+          }
+        ]
+      }
+    }
+    ```
+  </Step>
+  <Step title="Permission rules">
+    If no hook short-circuits, the rule engine evaluates three ordered rule lists against the tool name and input:
+
+    **`alwaysAllowRules`** — If the tool call matches a pattern in this list, it is approved without prompting. These rules come from:
+    - Persistent settings (`~/.claude/settings.json` or project `.claude/settings.json`)
+    - The `--allowedTools` CLI flag
+    - Session decisions when the user chooses "Allow Always"
+
+    **`alwaysDenyRules`** — If matched, the call is rejected silently. Sources: settings files, `--disallowedTools` CLI flag.
+
+    **`alwaysAskRules`** — If matched, always show the interactive prompt, even if a previous "Allow Always" decision exists for the same tool. Used to force explicit confirmation on high-risk tools.
+
+    Rule patterns match on the tool name (exact or glob), and some tools support more specific matching on input fields (e.g., matching `BashTool` calls whose command contains `rm -rf`).
+  </Step>
+  <Step title="Interactive prompt">
+    If no rule matches, the terminal shows an interactive permission prompt. The user sees:
+    - The tool name
+    - The full input (command, file path, query, etc.)
+    - Three options: **Allow Once**, **Allow Always**, **Deny**
+
+    **Allow Once** — permits this specific call and moves on. No rule is saved.
+
+    **Allow Always** — permits the call and adds a matching rule to `alwaysAllowRules` in the session state (and optionally to `settings.json`). Subsequent calls to the same tool with the same pattern skip the prompt.
+
+    **Deny** — rejects the call. Claude receives a `tool_result` indicating the denial and may try a different approach.
+
+    The permission dialog is rendered as a React/Ink component in `components/permissions/`. In headless/SDK mode where no TTY is available, the system falls back to behavior configured via `--permission-prompt-tool`.
+  </Step>
+  <Step title="checkPermissions()">
+    The final gate is the tool's own `checkPermissions()` method — tool-specific authorization logic that only the tool itself can evaluate.
+
+    The canonical example is path sandboxing in `FileEditTool` and `FileWriteTool`. These tools check that the target path is within an allowed working directory. The allowed directories come from `AppState.toolPermissionContext.additionalWorkingDirectories` and can be extended at runtime.
+
+    If `checkPermissions()` throws, the error is surfaced as a `tool_result` denial. The global permission pipeline cannot override this check.
+  </Step>
+</Steps>
+
+## Permission rule sources
+
+Rules accumulate from multiple sources and are merged into the `AppState.toolPermissionContext`:
+
+| Source | Scope | How to set |
+|--------|-------|------------|
+| `~/.claude/settings.json` | Global (all projects) | Edit directly or via `/config` |
+| `.claude/settings.json` | Project-local | Committed to the repository |
+| CLI flags (`--allowedTools`, `--disallowedTools`) | Session | Passed at startup |
+| "Allow Always" decisions | Session (in-memory) | User choice in interactive prompt |
+| PreToolUse hooks | Session | `settings.json` hooks configuration |
+
+<Warning>
+Project-local `.claude/settings.json` files can define `alwaysAllowRules` that automatically approve tool calls for anyone who opens that project. Review these files when working with untrusted repositories.
+</Warning>
+
+## Bypass permissions mode
+
+A separate `isBypassPermissionsModeAvailable` flag in `AppState` controls whether the permission pipeline can be bypassed entirely. When active, all tool calls are approved without running hooks, rules, or prompts. This mode is used in fully trusted automated environments (e.g., internal Anthropic infrastructure) and is controlled via GrowthBook feature flags — it cannot be enabled by end users through normal configuration.
+
+## State management
+
+Permission state lives in `AppState.toolPermissionContext` (defined in `state/AppStateStore.ts`):
+
+```typescript
+toolPermissionContext: {
+  mode: PermissionMode,                    // default | plan | bypassPermissions
+  additionalWorkingDirectories: string[],  // path sandbox extensions
+  alwaysAllowRules: PermissionRule[],      // auto-approve patterns
+  alwaysDenyRules: PermissionRule[],       // auto-deny patterns
+  alwaysAskRules: PermissionRule[],        // always-prompt patterns
+  isBypassPermissionsModeAvailable: boolean
+}
+```
+
+The React integration uses `useAppState(sel)` for selective subscriptions and `useSetAppState()` for immer-style updates. The permission dialog components in `components/permissions/` read and write this state directly.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Agent loop" icon="rotate-cw" href="/core/agent-loop">
+    Where canUseTool() fits in the query lifecycle
+  </Card>
+  <Card title="Tool system" icon="wrench" href="/core/tool-system">
+    The validateInput() and checkPermissions() methods on the tool interface
+  </Card>
+</Columns>

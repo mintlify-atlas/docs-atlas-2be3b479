@@ -1,0 +1,189 @@
+---
+title: "Telemetry & Privacy"
+description: Analysis of Claude Code's two-tier analytics pipeline, what data is collected, and privacy implications
+---
+
+<Note>
+  This page is based on publicly available source analysis and community research on Claude Code v2.1.88. It is not derived from official Anthropic documentation.
+</Note>
+
+## Overview
+
+Claude Code implements a two-tier analytics pipeline that collects extensive environment and usage metadata. While there is no evidence of keylogging or user code exfiltration, the breadth of collection and inability to fully opt out raises legitimate privacy concerns.
+
+## Data pipeline architecture
+
+Claude Code routes telemetry through two separate channels simultaneously: a first-party pipeline controlled by Anthropic, and a third-party pipeline to Datadog.
+
+### First-party logging (1P)
+
+| Property | Value |
+|----------|-------|
+| Endpoint | `https://api.anthropic.com/api/event_logging/batch` |
+| Protocol | OpenTelemetry with Protocol Buffers |
+| Batch size | Up to 200 events per batch |
+| Flush interval | Every 10 seconds |
+| Retry strategy | Quadratic backoff, up to 8 attempts |
+| Persistence | Failed events saved to `~/.claude/telemetry/` |
+
+Source: `src/services/analytics/firstPartyEventLoggingExporter.ts`
+
+### Third-party logging (Datadog)
+
+| Property | Value |
+|----------|-------|
+| Endpoint | `https://http-intake.logs.us5.datadoghq.com/api/v2/logs` |
+| Scope | Limited to 64 pre-approved event types |
+| Public token | `pubbbf48e6d78dae54bceaa4acf463299bf` |
+
+Source: `src/services/analytics/datadog.ts`
+
+```text
+First-Party Pipeline
+  [Client] ──OpenTelemetry/Protobuf──► [api.anthropic.com/api/event_logging/batch]
+              (up to 200 events/batch, 10s flush, 8-retry quadratic backoff)
+              (disk-persisted at ~/.claude/telemetry/ on failure)
+
+Third-Party Pipeline
+  [Client] ──HTTPS──► [http-intake.logs.us5.datadoghq.com/api/v2/logs]
+              (64 pre-approved event types only)
+```
+
+## What is collected
+
+### Environment fingerprint
+
+Every single event carries this metadata block (`src/services/analytics/metadata.ts:417-452`):
+
+```typescript
+// Attached to every analytics event
+{
+  platform,        // darwin, linux, win32
+  platformRaw,     // uname output
+  arch,            // x64, arm64
+  nodeVersion,
+  terminal,        // iTerm2, Windows Terminal, tmux, etc.
+  packageManagers, // npm, yarn, pnpm, bun — which are installed
+  runtimes,        // node, python, ruby versions detected
+  ciCd,            // boolean — is this a CI environment
+  githubActions,   // GitHub Actions metadata if present
+  wslVersion,      // WSL1 / WSL2 / null
+  linuxDistro,
+  kernelVersion,
+  vcsType,         // git, hg, svn
+  claudeCodeVersion,
+  buildTime,
+  deploymentEnv
+}
+```
+
+### Process metrics
+
+Collected at `metadata.ts:457-467`:
+
+```typescript
+{
+  uptime,        // process uptime in seconds
+  rss,           // resident set size
+  heapTotal,
+  heapUsed,
+  cpuUsage,      // user + system CPU time
+  cpuPercent,    // percentage of CPU used
+  arrayBuffers,  // external memory allocations
+}
+```
+
+### User tracking
+
+Collected at `metadata.ts:472-496`:
+
+```typescript
+{
+  model,              // model currently in use
+  sessionId,
+  userId,
+  deviceId,
+  accountUuid,
+  organizationUuid,
+  subscriptionTier,   // max, pro, enterprise, team
+  repoUrlHash,        // SHA256 of remote URL, first 16 chars
+  agentType,
+  teamName,
+  parentSessionId
+}
+```
+
+The `repoUrlHash` field means Anthropic can correlate sessions to specific repositories server-side, even though the raw URL is not transmitted.
+
+### Tool input logging
+
+Tool inputs are truncated before being logged (`metadata.ts:236-241`):
+
+| Data type | Truncation rule |
+|-----------|----------------|
+| Strings | Truncated at 512 chars, displayed as 128 chars + ellipsis |
+| JSON | Limited to 4,096 chars |
+| Arrays | Maximum 20 items |
+| Nested objects | Maximum 2 levels deep |
+
+However, when the environment variable `OTEL_LOG_TOOL_DETAILS=1` is set, **full tool inputs are logged without truncation** (`metadata.ts:86-88`).
+
+### File extension tracking
+
+Bash commands involving the following utilities have their file arguments' extensions extracted and logged (`metadata.ts:340-412`):
+
+```text
+rm  mv  cp  touch  mkdir  chmod  chown
+cat  head  tail  sort  stat  diff  wc  grep  rg  sed
+```
+
+For example, running `cp config.json config.backup.json` would log the extensions `.json` and `.json` as part of the event metadata.
+
+## The opt-out problem
+
+<Warning>
+  There is no user-facing setting to disable first-party event logging. The only escape hatches are test environments, third-party cloud providers, or a global opt-out mechanism that is not exposed in the settings UI.
+</Warning>
+
+The first-party logging pipeline is controlled by a single function:
+
+```typescript
+// src/services/analytics/firstPartyEventLogger.ts:141-144
+export function is1PEventLoggingEnabled(): boolean {
+  return !isAnalyticsDisabled()
+}
+```
+
+`isAnalyticsDisabled()` returns `true` — disabling logging — only under these conditions:
+
+1. **Test environments** — automated test runners
+2. **Third-party cloud providers** — Bedrock or Vertex deployments
+3. **Global telemetry opt-out** — an undocumented mechanism not surfaced in the settings UI
+
+Direct Anthropic API users (the majority of Claude Code users) have no supported way to disable first-party telemetry collection.
+
+## GrowthBook A/B testing
+
+Users are silently enrolled in experiments via GrowthBook without explicit consent. The following user attributes are sent to GrowthBook for experiment assignment (`src/services/analytics/growthbook.ts`):
+
+```typescript
+{
+  id,                // user ID
+  sessionId,
+  deviceId,
+  platform,
+  organizationUuid,
+  subscriptionType
+}
+```
+
+There is no notification to the user that they have been assigned to an experiment group.
+
+## Key takeaways
+
+1. **Volume**: Hundreds of events per session are collected across both pipelines
+2. **No opt-out**: First-party logging cannot be disabled by direct API users through any UI setting
+3. **Persistence**: Failed events are saved to disk and retried with quadratic backoff up to 8 times
+4. **Third-party sharing**: Data flows to Datadog, a third-party analytics vendor
+5. **Tool detail backdoor**: Setting `OTEL_LOG_TOOL_DETAILS=1` enables full tool input logging without truncation
+6. **Repository fingerprinting**: Repository URLs are hashed and sent, enabling server-side correlation across sessions

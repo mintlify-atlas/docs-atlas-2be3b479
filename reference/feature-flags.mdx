@@ -1,0 +1,161 @@
+---
+title: "Feature Flags"
+description: Compile-time Bun DCE flags, runtime GrowthBook gates, and the tengu_ naming convention used in Claude Code's feature gating system.
+---
+
+Claude Code uses a **two-layer feature gating system**: compile-time dead code elimination (DCE) via Bun's bundle flags, and runtime gates via environment variables and GrowthBook A/B experiments. A third layer — the `tengu_` naming convention — deliberately obscures the purpose of runtime flags from external observers.
+
+---
+
+## How Compile-Time Flags Work
+
+Claude Code is compiled with [Bun](https://bun.sh), which supports dead code elimination at bundle time. The `feature()` function is a Bun-native API that resolves to a boolean constant at compile time:
+
+```typescript
+// Pattern used throughout the codebase
+if (feature('WEB_BROWSER_TOOL')) {
+  // This entire block is stripped from external builds
+  registerTool(new WebBrowserTool())
+}
+```
+
+When a flag is `false`, the entire branch — including imports, class definitions, and registrations — is **stripped from the compiled bundle**. This means unreleased tools have zero runtime overhead and zero surface area in the distributed binary.
+
+```
+feature('FLAG_NAME')  ──→  true  → code included in bundle
+                       ──→  false → code eliminated from bundle
+```
+
+<Info>
+  This is why reverse-engineering Claude Code requires analyzing the source before compilation, not the distributed binary. The binary for external users simply does not contain the code for unreleased features.
+</Info>
+
+---
+
+<Tabs>
+  <Tab title="Compile-Time Flags">
+    The following flags are resolved at Bun bundle time. All flags listed below have been observed in Claude Code v2.1.88 source. The value in external builds is `false` unless otherwise noted.
+
+    | Flag | Description | External Build |
+    |------|-------------|:--------------:|
+    | `COORDINATOR_MODE` | Multi-agent coordinator mode. Enables `src/coordinator/coordinatorMode.ts`, which adds idle-cycle scanning and auto-claiming of tasks across a team. | `false` |
+    | `HISTORY_SNIP` | Aggressive history trimming via `SnipTool`. Removes zombie messages and stale compact markers to reclaim context window space. | `false` |
+    | `CONTEXT_COLLAPSE` | Context restructuring strategy. Collapses older context into a more compact representation, distinct from the summarization approach used by `autoCompact`. | `false` |
+    | `DAEMON` | Background daemon worker support. Enables persistent background workers that can execute tasks without a foreground REPL session. | `false` |
+    | `AGENT_TRIGGERS` | Cron-style and event-driven trigger system. Enables `ScheduleCronTool` and allows agents to register recurring or event-based invocations. | `false` |
+    | `AGENT_TRIGGERS_REMOTE` | Remote trigger support. Extends `AGENT_TRIGGERS` to work across the bridge layer, enabling remote agents to be triggered by external events. | `false` |
+    | `MONITOR_TOOL` | Registers `MonitorTool` for system and process monitoring. MCP-style observability interface for runtime metrics. | `false` |
+    | `WEB_BROWSER_TOOL` | Registers `WebBrowserTool` (codename: **bagel**), a full browser automation tool. Extends beyond `WebFetchTool`'s HTTP-only model to include JavaScript rendering and interaction. | `false` |
+    | `VOICE_MODE` | Voice input/output (push-to-talk). Connects to Anthropic's `voice_stream` WebSocket endpoint using mTLS. Hold-to-talk keybinding maps speech to text. OAuth-only; no API key/Bedrock/Vertex support. | `false` |
+    | `TEMPLATES` | Job classifier / template system. Enables a template-based approach to routing tasks to specialized agent configurations. | `false` |
+    | `EXPERIMENTAL_SKILL_SEARCH` | Enhanced skill discovery. Enables fuzzy search and semantic matching over the `memdir/` skill store, beyond exact-name lookup. | `false` |
+    | `KAIROS` | The KAIROS autonomous agent mode. Enables `<tick>` heartbeat prompts, `SleepTool` pacing, proactive file sends, and terminal focus-aware autonomy adjustment. The largest unreleased feature. | `false` |
+    | `PROACTIVE` | Subset of KAIROS: enables `SleepTool` and proactive behavior without the full autonomous agent infrastructure. | `false` |
+    | `OVERFLOW_TEST_TOOL` | Registers `OverflowTestTool` for testing context overflow scenarios and validating compaction behavior under extreme context pressure. | `false` |
+    | `TERMINAL_PANEL` | Terminal panel capture via `TerminalCaptureTool`. Injects live terminal output into the agent's context. | `false` |
+    | `WORKFLOW_SCRIPTS` | Enables `WorkflowTool` for executing predefined workflow scripts. Workflow automation layer on top of the agent loop. | `false` |
+    | `CHICAGO_MCP` | Computer use MCP integration. Enables a Model Context Protocol server for computer-use / desktop automation scenarios. | `false` |
+    | `DUMP_SYSTEM_PROMPT` | System prompt extraction utility. Dumps the assembled system prompt to disk or stdout for debugging. Restricted to `ant`-internal users even when enabled. | `false` |
+    | `UDS_INBOX` | Unix domain socket peer discovery. Enables `ListPeersTool` for local multi-agent peer detection via UDS inbox. | `false` |
+    | `ABLATION_BASELINE` | Experiment ablation mode. Disables specific optimizations to establish a baseline for A/B experiments. | `false` |
+    | `UPGRADE_NOTICE` | Displays upgrade notifications in the REPL when a newer version of Claude Code is available. | `true` |
+
+    <Note>
+      The `KAIROS`-related flag family spans multiple compile-time and runtime flags. The compile-time `KAIROS` flag gates the core infrastructure; associated runtime GrowthBook flags gate specific sub-features independently.
+    </Note>
+
+    ### KAIROS Sub-Flags
+
+    The KAIROS autonomous agent mode has its own flag family beyond the primary `KAIROS` compile-time flag:
+
+    | Flag | Type | Purpose |
+    |------|------|---------|
+    | `KAIROS` | Compile-time | Core autonomous agent infrastructure, `<tick>` heartbeats, `SleepTool` |
+    | `KAIROS_PUSH_NOTIFICATION` | Runtime | Push notifications to user devices via `PushNotificationTool` |
+    | `KAIROS_GITHUB_WEBHOOKS` | Runtime | GitHub PR webhook subscriptions via `SubscribePRTool` |
+    | `KAIROS_BRIEF` | Runtime | Proactive status updates via `BriefTool` |
+
+  </Tab>
+
+  <Tab title="Runtime GrowthBook Flags">
+    Runtime feature flags operate after the bundle is loaded. They are evaluated at process startup or lazily on first use, and can change user behavior without redeployment.
+
+    ### Internal User Gate
+
+    The most significant runtime gate is a direct environment variable check:
+
+    ```typescript
+    // Checked throughout the codebase
+    process.env.USER_TYPE === 'ant'
+    ```
+
+    When `USER_TYPE` is `'ant'`, internal Anthropic employees receive:
+
+    | Capability | External Users | Internal (`ant`) |
+    |------------|:--------------:|:----------------:|
+    | Output verbosity guidance | "Be extra concise" | "Err on the side of more explanation" |
+    | Capybara v8 behavioral patches | None | Dedicated false-claims mitigation prompts |
+    | Numeric length anchors | None | `≤25 words between tools, ≤100 words final` |
+    | Verification agent | None | Required for non-trivial changes |
+    | Anti-over-commenting prompt | Generic | Dedicated patch |
+    | Proactive correction | None | "If user has misconception, say so" |
+    | `TungstenTool` | Not registered | Registered and available |
+    | `DumpSystemPromptTool` | Not registered | Registered (with `DUMP_SYSTEM_PROMPT` flag) |
+    | `VerifyPlanExecutionTool` | Not registered | Registered |
+    | Agent nesting (agents spawning agents) | Restricted | Allowed |
+
+    ### GrowthBook A/B Flags
+
+    GrowthBook flags are evaluated at runtime against a remote feature flag service. These allow Anthropic to change any user's behavior — including running A/B experiments — without shipping a new build.
+
+    <Warning>
+      GrowthBook flags are fetched from a remote service and can change user behavior **without the user's knowledge or consent**. The remote settings endpoint is polled hourly.       See [Remote Control & Killswitches](/analysis/remote-control-and-killswitches) for the full polling mechanism.
+    </Warning>
+
+    ### The `tengu_` Naming Convention
+
+    All GrowthBook flags use the `tengu_` prefix followed by **random word pairs** (typically an adjective or material + a nature or object noun). This deliberately obscures the flag's purpose from external observers, making it impossible to infer feature intent from the flag name alone.
+
+    ```
+    tengu_  +  [material/adjective]  +  _  +  [nature/object]
+    
+    Examples:
+      tengu_onyx_plover      ← "onyx" (mineral) + "plover" (bird)
+      tengu_frond_boric      ← "frond" (plant part) + "boric" (chemistry)
+      tengu_amber_quartz_disabled  ← three-part name (kill switches can use longer names)
+    ```
+
+    **Tengu** (天狗) is itself an internal codename — a Japanese mythological creature — used as the product/telemetry prefix across all 250+ analytics events and GrowthBook flags.
+
+    ### Known `tengu_` Flags
+
+    | Flag | Purpose |
+    |------|---------|
+    | `tengu_onyx_plover` | Auto Dream — background memory consolidation via `DreamTask`. Controlled by this flag; runs during idle time. |
+    | `tengu_coral_fern` | `memdir` feature gate — enables the memory directory system for persistent, lazy-loaded knowledge files. |
+    | `tengu_moth_copse` | Secondary `memdir` switch — a separate gate for a specific aspect of the memory directory feature. |
+    | `tengu_herring_clock` | Team memory — enables shared memory state across agent teams created with `TeamCreateTool`. |
+    | `tengu_passport_quail` | Path feature — controls a specific path-related capability (exact behavior internal). |
+    | `tengu_slate_thimble` | Tertiary `memdir` switch — a third gate for memory directory functionality, enabling staged rollout. |
+    | `tengu_sedge_lantern` | Away Summary — generates a summary of agent activity for users who return after being away. |
+    | `tengu_frond_boric` | Analytics kill switch — disables one or more analytics sinks when activated. |
+    | `tengu_amber_quartz_disabled` | Voice mode kill switch — remotely disables voice mode even if the `VOICE_MODE` compile flag is enabled. |
+    | `tengu_amber_flint` | Agent teams — enables the multi-agent team system (`TeamCreateTool`, `InProcessTeammateTask`). |
+    | `tengu_hive_evidence` | Verification agent — enables the internal verification sub-agent that checks non-trivial changes (ant-only). |
+
+    ### Killswitch Flags
+
+    A subset of `tengu_` flags function as **remote killswitches** — they are specifically designed to disable features remotely without a code deployment:
+
+    | Flag | Kills |
+    |------|-------|
+    | `tengu_amber_quartz_disabled` | Voice mode (`VOICE_MODE`) — disables voice input/output globally |
+    | `tengu_penguins_off` | Killswitch for a specific agent or coordination feature |
+    | `tengu_marble_sandcastle` | Killswitch for another feature area |
+    | `tengu_frond_boric` | Analytics reporting — can silence telemetry sinks |
+
+    <Warning>
+      Killswitch flags can be activated remotely via the GrowthBook flag service without any client update. When a dangerous remote settings change is pushed, Claude Code displays a **blocking dialog** — rejecting the dialog causes the application to exit. There is no way to continue using the application while refusing a mandatory settings change.
+    </Warning>
+  </Tab>
+</Tabs>

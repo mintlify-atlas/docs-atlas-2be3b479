@@ -1,0 +1,169 @@
+---
+title: "State Management"
+description: "The AppState store and React integration"
+---
+
+Claude Code manages application state through a single `AppState` store defined in `AppStateStore.ts` and exposed to the React/Ink component tree via `AppState.tsx`. State updates use an immer-style updater pattern, and components subscribe to specific state slices via selector functions.
+
+## AppState structure
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│                  AppState Store                           │
+│                                                          │
+│  AppState {                                              │
+│    toolPermissionContext: {                              │
+│      mode: PermissionMode,           ← default/plan/etc │
+│      additionalWorkingDirectories,                        │
+│      alwaysAllowRules,               ← auto-approve      │
+│      alwaysDenyRules,                ← auto-reject       │
+│      alwaysAskRules,                 ← always prompt     │
+│      isBypassPermissionsModeAvailable                    │
+│    },                                                    │
+│    fileHistory: FileHistoryState,    ← undo snapshots    │
+│    attribution: AttributionState,    ← commit tracking   │
+│    verbose: boolean,                                     │
+│    mainLoopModel: string,           ← active model       │
+│    fastMode: FastModeState,                              │
+│    speculation: SpeculationState                          │
+│  }                                                       │
+│                                                          │
+│  React Integration:                                      │
+│  ├── AppStateProvider   → creates store via createContext │
+│  ├── useAppState(sel)   → selector-based subscriptions   │
+│  └── useSetAppState()   → immer-style updater function   │
+└──────────────────────────────────────────────────────────┘
+```
+
+## State fields
+
+### toolPermissionContext
+
+The most complex field in `AppState`. It carries all information needed to evaluate whether a tool call should be allowed, denied, or prompted.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `mode` | `PermissionMode` | Active permission mode: `default`, `plan`, or `bypass` |
+| `additionalWorkingDirectories` | `string[]` | Extra directories the agent is allowed to access |
+| `alwaysAllowRules` | `PermissionRule[]` | Patterns that auto-approve matching tool calls |
+| `alwaysDenyRules` | `PermissionRule[]` | Patterns that auto-reject matching tool calls |
+| `alwaysAskRules` | `PermissionRule[]` | Patterns that always prompt, overriding allow rules |
+| `isBypassPermissionsModeAvailable` | `boolean` | Whether the bypass mode killswitch is active |
+
+### Permission modes
+
+<Tabs>
+  <Tab title="default">
+    The standard interactive mode. Tool calls that match `alwaysAllowRules` are auto-approved. Calls that match `alwaysDenyRules` are auto-rejected. All other calls trigger the interactive permission prompt, where the user can approve once, approve always, or deny.
+
+    Most sessions run in default mode. Permission decisions made during a session (e.g., "allow always") are stored back into `alwaysAllowRules` for the session's duration.
+  </Tab>
+  <Tab title="plan">
+    In plan mode, **all tool calls that have side effects are blocked**. Read-only tools (file reads, searches, web fetches) continue to work. This mode is used by `EnterPlanModeTool` to let Claude draft a plan before executing it.
+
+    The `mode` field is set to `"plan"` when `EnterPlanModeTool` runs and restored to `"default"` when `ExitPlanModeTool` runs.
+
+    In plan mode, side-effecting tools (those where `isDestructive()` or `!isReadOnly()`) are automatically blocked by the permission engine. The agent can only call read-only tools, `TodoWriteTool`, and planning utilities until `ExitPlanModeTool` is invoked.
+  </Tab>
+  <Tab title="bypass">
+    In bypass mode, **all permission checks are skipped**. Tool calls proceed without any prompt or rule evaluation. This mode is controlled by a remote killswitch (`isBypassPermissionsModeAvailable`) and is typically only available in specific deployment contexts.
+
+    <Warning>
+    Bypass mode is a powerful escape hatch intended for automated pipelines and controlled environments. It completely disables the permission system. The `isBypassPermissionsModeAvailable` flag is controlled remotely and cannot be force-enabled by the user.
+    </Warning>
+  </Tab>
+</Tabs>
+
+### fileHistory
+
+`FileHistoryState` stores snapshots of file contents before each write or edit operation. This enables the undo system — if the agent makes an unwanted change, the previous file content can be restored from the snapshot.
+
+The snapshot pattern is implemented as a simple stack: each destructive file operation pushes the pre-operation content. An undo operation pops the stack and writes the snapshot back to disk.
+
+### attribution
+
+`AttributionState` tracks commit attribution information for changes made during the session. This is used to annotate git commits with agent authorship metadata, supporting the undercover mode logic that controls how AI authorship is represented in commit messages.
+
+### mainLoopModel
+
+The string identifier of the model currently active for the main agent loop (e.g., `"claude-opus-4-5"`). This can be changed at runtime via the `/model` command or remotely via the settings sync killswitch. Model selection logic lives in `utils/model/`.
+
+### fastMode
+
+`FastModeState` controls whether the agent uses a faster, lower-cost model for certain operations. Fast mode can be toggled by the user or overridden remotely. When active, `query()` selects a different model for applicable requests.
+
+### speculation
+
+`SpeculationState` supports speculative tool execution — pre-running likely tool calls before Claude explicitly requests them, to reduce latency. This is an experimental optimization feature.
+
+## React integration
+
+`AppState.tsx` exposes the store to the React/Ink component tree through three primitives:
+
+### AppStateProvider
+
+Wraps the application root. Creates the store instance via `createContext` and makes it available to all descendant components.
+
+```typescript
+// Application root
+<AppStateProvider initialState={bootstrappedState}>
+  <App />
+</AppStateProvider>
+```
+
+### useAppState(selector)
+
+A hook that subscribes a component to a specific slice of state. The component re-renders only when the selected slice changes — not on every state update. This is the primary way to read state in components.
+
+```typescript
+// Read only the permission mode — no re-render on other state changes
+const mode = useAppState(s => s.toolPermissionContext.mode)
+
+// Read the active model string identifier
+const model = useAppState(s => s.mainLoopModel)
+
+// Read verbose flag
+const verbose = useAppState(s => s.verbose)
+```
+
+### useSetAppState()
+
+Returns an updater function that accepts an immer-style recipe. The recipe receives a mutable draft of the current state; changes to the draft are applied immutably to produce the next state.
+
+```typescript
+const setState = useSetAppState()
+
+// Add a new always-allow rule
+setState(draft => {
+  draft.toolPermissionContext.alwaysAllowRules.push({
+    tool: "BashTool",
+    pattern: "npm test"
+  })
+})
+
+// Switch to plan mode
+setState(draft => {
+  draft.toolPermissionContext.mode = "plan"
+})
+```
+
+<Note>
+The immer-style updater means you never need to spread or clone state manually. Mutations to the draft are safe and produce a correctly immutable next state.
+</Note>
+
+## Key source files
+
+<Columns cols={2}>
+  <Card title="state/AppStateStore.ts" icon="database" href="#">
+    Store definition: the `AppState` type, initial state factory, and the Zustand-compatible store implementation.
+  </Card>
+  <Card title="state/AppState.tsx" icon="react" href="#">
+    React provider and hooks: `AppStateProvider`, `useAppState`, and `useSetAppState`.
+  </Card>
+  <Card title="utils/permissions/" icon="shield" href="#">
+    Permission rule engine. Evaluates `alwaysAllowRules`, `alwaysDenyRules`, and `alwaysAskRules` against tool call inputs.
+  </Card>
+  <Card title="hooks/useCanUseTool.tsx" icon="check-circle" href="#">
+    React hook that combines `toolPermissionContext` with tool-specific `checkPermissions()` to produce a final allow/deny decision.
+  </Card>
+</Columns>

@@ -1,0 +1,184 @@
+---
+title: "Tool Inventory"
+description: Complete reference for all 40+ built-in tools in Claude Code, organized by category with concurrency and permission metadata.
+---
+
+## Tool Interface Properties
+
+Every tool in Claude Code implements the following capability flags. Understanding these properties is essential for reasoning about execution safety and parallelism.
+
+| Property | Method | Meaning |
+|----------|--------|---------|
+| **Read-only** | `isReadOnly()` | Tool has no side effects — it only observes state, never modifies it. Read-only tools are safe to run without user confirmation in permissive modes. |
+| **Destructive** | `isDestructive()` | Tool performs irreversible operations (e.g., deleting files, running shell commands with side effects). Requires explicit user approval unless pre-approved. |
+| **Concurrency safe** | `isConcurrencySafe()` | Tool can run in parallel with other tools in the same `StreamingToolExecutor` batch. Tools that are NOT concurrency-safe are serialized. |
+| **Interrupt behavior** | `interruptBehavior()` | Controls what happens when the user interrupts a running tool: `cancel` aborts immediately, `block` waits for completion before surfacing the interrupt. |
+
+<Note>
+  The `StreamingToolExecutor` partitions tools into two groups per API response: concurrency-safe tools execute in parallel, while serial tools execute sequentially. This is the primary throughput optimization in Claude Code's tool execution engine (`src/services/tools/StreamingToolExecutor.ts`).
+</Note>
+
+---
+
+## Tool Categories
+
+<Tabs>
+  <Tab title="File Operations">
+    Tools for reading, writing, and editing files on the local filesystem.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `FileReadTool` | Reads file contents, including PDFs, images, and binary formats. Supports offset and line-limit parameters for large files. | Yes | `src/tools/FileReadTool/` |
+    | `FileEditTool` | Performs precise string-replace edits on existing files. Requires exact `oldString` match; fails on ambiguous or missing matches to prevent unintended changes. | No | `src/tools/FileEditTool/` |
+    | `FileWriteTool` | Creates or completely overwrites a file with new content. Used for scaffolding new files or full rewrites. | No | `src/tools/FileWriteTool/` |
+    | `NotebookEditTool` | Edits Jupyter notebook (`.ipynb`) cells, including code, markdown, and output cells. Handles notebook JSON structure natively. | No | `src/tools/NotebookEditTool/` |
+
+    <Tip>
+      `FileReadTool` is marked read-only and concurrency-safe, so multiple file reads can be batched and executed in parallel within a single agent turn. `FileEditTool` and `FileWriteTool` are serial to prevent race conditions on the same file.
+    </Tip>
+  </Tab>
+
+  <Tab title="Search & Discovery">
+    Tools for finding files and searching content across the codebase.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `GlobTool` | Matches files by glob pattern (e.g., `**/*.ts`). Returns matching paths sorted by modification time. Fast; does not read file contents. | Yes | `src/tools/GlobTool/` |
+    | `GrepTool` | Searches file contents using ripgrep with full regex support. Returns matching file paths and line numbers. Supports `include` pattern to filter by file type. | Yes | `src/tools/GrepTool/` |
+    | `ToolSearchTool` | Searches the registered tool inventory by name or description. Used by the agent to discover available tools dynamically, especially in MCP-extended environments. | Yes | `src/tools/ToolSearchTool/` |
+
+    <Info>
+      All three search tools are read-only and concurrency-safe. The agent frequently fans out multiple `GlobTool` and `GrepTool` calls in parallel when exploring an unfamiliar codebase.
+    </Info>
+  </Tab>
+
+  <Tab title="Execution">
+    Tools for running shell commands and scripts.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `BashTool` | Executes arbitrary shell commands via Bash. Supports streaming output, timeout configuration, and sandbox runtime adapters. The most powerful and most carefully permission-gated tool in the inventory. | No | `src/tools/BashTool/` |
+    | `PowerShellTool` | Executes PowerShell commands on Windows environments. Mirrors `BashTool` semantics on non-Unix systems. | No | `src/tools/PowerShellTool/` |
+
+    <Warning>
+      `BashTool` is destructive and not concurrency-safe. Every invocation goes through the full permission pipeline: pre-tool-use hooks → allow/deny rules → interactive prompt (if no matching rule). The permission check includes path sandboxing to restrict access to `additionalWorkingDirectories`.
+    </Warning>
+  </Tab>
+
+  <Tab title="Web & Network">
+    Tools for retrieving content from the internet.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `WebFetchTool` | Fetches content from a URL and converts it to markdown, text, or raw HTML. Automatically upgrades HTTP to HTTPS. Supports configurable timeout. | Yes | `src/tools/WebFetchTool/` |
+    | `WebSearchTool` | Performs web searches and returns structured results with titles, URLs, and snippets. Used for research tasks when the agent needs current information. | Yes | `src/tools/WebSearchTool/` |
+
+    <Info>
+      Both web tools are concurrency-safe and can be executed in parallel with other read-only tools. `WebFetchTool` redirects are followed transparently; the agent receives the final resolved content.
+    </Info>
+  </Tab>
+
+  <Tab title="Agent / Task">
+    Tools for spawning sub-agents, managing teams, and coordinating task boards.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `AgentTool` | Spawns a sub-agent with a fresh `messages[]` context. Supports four spawn modes: `default` (in-process), `fork` (child process), `worktree` (isolated git worktree + fork), and `remote` (bridge). | No | `src/tools/AgentTool/` |
+    | `SendMessageTool` | Sends a message to another agent's inbox. The primary inter-agent communication primitive. Supports request-response patterns between teammates. | No | `src/tools/SendMessageTool/` |
+    | `TeamCreateTool` | Creates a persistent team of in-process teammates with async mailboxes. Used by the lead agent to initialize a swarm. | No | `src/tools/TeamCreateTool/` |
+    | `TeamDeleteTool` | Tears down a team and all its teammate processes. Cleans up shared state and mailboxes. | No | `src/tools/TeamDeleteTool/` |
+    | `TaskCreateTool` | Creates a task entry on the shared file-based task board with status, description, and optional dependencies. | No | `src/tools/TaskCreateTool/` |
+    | `TaskGetTool` | Retrieves the current state of a specific task by ID. | Yes | `src/tools/TaskGetTool/` |
+    | `TaskUpdateTool` | Updates a task's status, output, or metadata on the task board. Used by agents to claim, progress, and complete tasks. | No | `src/tools/TaskUpdateTool/` |
+    | `TaskListTool` | Lists all tasks on the shared task board, with optional status filters. | Yes | `src/tools/TaskListTool/` |
+    | `TaskStopTool` | Signals a running task to stop. Sends a cancellation signal to the task's execution context. | No | `src/tools/TaskStopTool/` |
+    | `TaskOutputTool` | Retrieves the output (stdout/stderr) of a task, including partial output from still-running tasks. | Yes | `src/tools/TaskOutputTool/` |
+
+    <Note>
+      The task board is file-based and persists across agent turns. Tasks have an ID format of `prefix + 8 chars` where `b=bash`, `a=agent`, `r=remote`, `t=team`. This allows agents to coordinate work across `LocalShellTask`, `LocalAgentTask`, `RemoteAgentTask`, and `InProcessTeammateTask` implementations.
+    </Note>
+  </Tab>
+
+  <Tab title="MCP Protocol">
+    Tools for interacting with Model Context Protocol servers and resources.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `MCPTool` | Wrapper that proxies calls to any tool registered by a connected MCP server. Tool names follow the `mcp__<server>__<tool>` convention. Schema is dynamically loaded from the MCP server at connection time. | Varies | `src/tools/MCPTool/` |
+    | `ListMcpResourcesTool` | Lists all resources exposed by connected MCP servers. Resources are URI-addressable data sources (files, database records, API responses). | Yes | `src/tools/ListMcpResourcesTool/` |
+    | `ReadMcpResourceTool` | Reads a specific MCP resource by URI. Returns the resource content in the format declared by the MCP server. | Yes | `src/tools/ReadMcpResourceTool/` |
+
+    <Info>
+      MCP servers can be connected via five transports: `stdio` (child process), `sse` (HTTP EventSource), `http` (Streamable HTTP), `ws` (WebSocket), and `sdk` (in-process). Authentication supports OAuth 2.0, Cross-App Access (XAA / SEP-990), and API key headers. See `src/services/mcp/MCPConnectionManager.tsx`.
+    </Info>
+  </Tab>
+
+  <Tab title="Interaction">
+    Tools for communicating with the user during task execution.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `AskUserQuestionTool` | Pauses execution and prompts the user with a question, waiting for a response before continuing. Used when the agent needs clarification it cannot infer from context. | No | `src/tools/AskUserQuestionTool/` |
+    | `BriefTool` | Sends a proactive status update or summary to the user without blocking. Associated with the `KAIROS_BRIEF` feature flag for autonomous agent mode. | No | `src/tools/BriefTool/` |
+
+    <Tip>
+      `AskUserQuestionTool` uses `interruptBehavior: block` — it will not be cancelled by a user interrupt, since it is itself waiting for user input. `BriefTool` is a non-blocking fire-and-display update used in KAIROS autonomous mode to keep users informed while the agent continues working.
+    </Tip>
+  </Tab>
+
+  <Tab title="Planning & Workflow">
+    Tools for structuring work, managing plans, and isolating git environments.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `EnterPlanModeTool` | Activates plan mode, which restricts the agent to read-only operations. The agent enumerates steps before executing any writes. Doubles task completion rate in practice. | No | `src/tools/EnterPlanModeTool/` |
+    | `ExitPlanModeTool` | Exits plan mode and returns the agent to normal execution mode, allowing write operations. | No | `src/tools/ExitPlanModeTool/` |
+    | `EnterWorktreeTool` | Creates an isolated git worktree and switches the agent's working directory to it. Each worktree has a unique ID. Used in `worktree` spawn mode for multi-agent isolation. | No | `src/tools/EnterWorktreeTool/` |
+    | `ExitWorktreeTool` | Exits the current worktree and returns to the main working directory. Cleans up the worktree. | No | `src/tools/ExitWorktreeTool/` |
+    | `TodoWriteTool` | Writes and updates a structured to-do list for the current task. Used to track progress through multi-step tasks. Persisted in the session context. | No | `src/tools/TodoWriteTool/` |
+
+    <Note>
+      Plan mode is implemented via `PermissionMode` in `AppState`. When `mode === 'plan'`, the permission engine automatically denies all destructive tool calls and informs the agent to enumerate steps instead. `EnterPlanModeTool` / `ExitPlanModeTool` toggle this mode at runtime.
+    </Note>
+  </Tab>
+
+  <Tab title="System">
+    Internal and utility tools for configuration, scheduling, and monitoring.
+
+    | Tool Name | Description | Concurrency Safe | Source Path |
+    |-----------|-------------|:----------------:|-------------|
+    | `ConfigTool` | Reads and writes Claude Code configuration settings. Wraps the settings management layer in `src/utils/settings/`. | No | `src/tools/ConfigTool/` |
+    | `SkillTool` | Loads a skill (structured knowledge document) by name and injects it into the conversation via `tool_result`. Skills are stored in `memdir/` and loaded lazily — not in the system prompt. | No | `src/tools/SkillTool/` |
+    | `LSPTool` | Queries a Language Server Protocol (LSP) server for code intelligence: hover info, go-to-definition, diagnostics, and completions. | Yes | `src/tools/LSPTool/` |
+    | `ScheduleCronTool` | Registers a cron-style scheduled trigger. Associated with `AGENT_TRIGGERS` feature flag. Enables KAIROS-style autonomous scheduling. | No | `src/tools/ScheduleCronTool/` |
+    | `SleepTool` | Pauses agent execution for a specified duration. Used in KAIROS autonomous mode (`PROACTIVE` flag) to pace actions when idle. The agent calls `SleepTool` instead of looping aggressively. | No | `src/tools/SleepTool/` |
+    | `TungstenTool` | Internal performance monitoring panel. Displays runtime metrics, latency, and token usage. Available to Anthropic employees (`USER_TYPE === 'ant'`) only. | No | `src/tools/TungstenTool/` |
+
+    <Warning>
+      `TungstenTool` is restricted to internal Anthropic users via the `process.env.USER_TYPE === 'ant'` gate. It is not available in external builds and does not appear in the tool list for external users.
+    </Warning>
+  </Tab>
+
+  <Tab title="Unreleased">
+    Tools found in the Claude Code source but not yet enabled for external users. These are gated behind compile-time feature flags or internal-only access controls.
+
+    <Warning>
+      The following tools are **not available to external users**. They are documented here for research and architectural understanding based on publicly available source analysis. Feature flags are listed for each tool; all flags are `false` in external builds.
+    </Warning>
+
+    | Tool Name | Feature Flag | Description |
+    |-----------|-------------|-------------|
+    | `WebBrowserTool` | `WEB_BROWSER_TOOL` | Built-in browser automation tool (internal codename: **bagel**). Enables full browser control beyond simple HTTP fetching. |
+    | `TerminalCaptureTool` | `TERMINAL_PANEL` | Captures and monitors the terminal panel output. Used for terminal-aware context injection. |
+    | `WorkflowTool` | `WORKFLOW_SCRIPTS` | Executes predefined workflow scripts. Part of the workflow automation feature. |
+    | `MonitorTool` | `MONITOR_TOOL` | System and process monitoring. Provides runtime observability as an MCP-style monitoring interface. |
+    | `SnipTool` | `HISTORY_SNIP` | Conversation history snipping and truncation. Aggressively trims stale messages to reclaim context window space. |
+    | `ListPeersTool` | `UDS_INBOX` | Discovers peers via Unix domain socket inbox. Used for local multi-agent peer discovery. |
+    | `RemoteTriggerTool` | `AGENT_TRIGGERS_REMOTE` | Triggers remote agents via the bridge layer. Extends `AGENT_TRIGGERS` to remote execution contexts. |
+    | `VerifyPlanExecutionTool` | `VERIFY_PLAN` env var | Verifies that a plan was executed correctly. Available to internal users and via environment variable override. |
+    | `OverflowTestTool` | `OVERFLOW_TEST_TOOL` | Testing tool for context overflow scenarios. Used to validate compaction behavior under extreme context pressure. |
+    | `SubscribePRTool` | `KAIROS_GITHUB_WEBHOOKS` | Subscribes to GitHub PR webhook events. Part of KAIROS autonomous agent mode — enables the agent to react to PR activity proactively. |
+    | `SendUserFileTool` | `KAIROS` | Proactively sends files from the agent's filesystem to the user's device. Part of the KAIROS autonomous agent mode. |
+    | `PushNotificationTool` | `KAIROS` / `KAIROS_PUSH_NOTIFICATION` | Sends push notifications to the user's device from within the autonomous agent. |
+  </Tab>
+</Tabs>

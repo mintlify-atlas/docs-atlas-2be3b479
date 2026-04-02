@@ -1,0 +1,103 @@
+{
+  "projectType": "general",
+  "projectName": "Learn Coding Agent",
+  "projectDescription": "A deep research and educational repository reverse-engineering the architecture, internals, and hidden features of Claude Code — Anthropic's CLI coding agent.",
+  "theme": "palm",
+  "primaryColor": "#4F6EF7",
+  "lightColor": "#EEF1FE",
+  "darkColor": "#1A2560",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Overview",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": ["introduction", "architecture-overview"]
+          },
+          {
+            "group": "Core Architecture",
+            "pages": [
+              "core/agent-loop",
+              "core/tool-system",
+              "core/permission-system",
+              "core/context-management"
+            ]
+          },
+          {
+            "group": "Advanced Systems",
+            "pages": [
+              "advanced/multi-agent",
+              "advanced/mcp-integration",
+              "advanced/bridge-layer",
+              "advanced/session-persistence",
+              "advanced/state-management"
+            ]
+          },
+          {
+            "group": "The 12 Harness Mechanisms",
+            "pages": [
+              "harness/overview",
+              "harness/mechanisms"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Deep Analysis",
+        "groups": [
+          {
+            "group": "Research Reports",
+            "pages": [
+              "analysis/telemetry-and-privacy",
+              "analysis/hidden-features-and-codenames",
+              "analysis/undercover-mode",
+              "analysis/remote-control-and-killswitches",
+              "analysis/future-roadmap"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/tool-inventory",
+              "reference/feature-flags",
+              "reference/directory-structure"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Deep analysis of Claude Code's agent loop and query lifecycle",
+    "Complete tool inventory with 40+ built-in tools documented",
+    "Permission system architecture with hook flow diagrams",
+    "Multi-agent and sub-agent spawning patterns",
+    "MCP (Model Context Protocol) integration architecture",
+    "Context compression strategies (autoCompact, snipCompact, contextCollapse)",
+    "Telemetry pipeline analysis with privacy implications",
+    "Hidden features, model codenames, and feature flag reverse engineering",
+    "Undercover mode mechanics and attribution system",
+    "Remote control infrastructure and killswitch mechanisms",
+    "Future roadmap findings: KAIROS, Numbat, Voice Mode",
+    "The 12 Progressive Harness Mechanisms for production AI agents",
+    "Quadrilingual documentation (EN/JA/KO/ZH)"
+  ],
+  "publicApiSurface": [
+    "QueryEngine.submitMessage(prompt) → AsyncGenerator<SDKMessage>",
+    "buildTool(definition) → Tool<Input, Output, Progress>",
+    "tool.call() — execute tool and return result",
+    "tool.checkPermissions() — tool-specific authorization",
+    "tool.validateInput() — reject invalid args early",
+    "tool.isEnabled() — feature gate check",
+    "tool.isConcurrencySafe() — parallel execution eligibility",
+    "StreamingToolExecutor — parallel tool runner",
+    "AppStateStore — global application state",
+    "useAppState(selector) — React selector-based subscription",
+    "AgentTool — sub-agent spawning",
+    "MCPTool — MCP protocol wrapper",
+    "BashTool — shell command execution",
+    "FileReadTool / FileEditTool / FileWriteTool — file operations",
+    "TaskCreate/Update/Get/List — persistent task management"
+  ]
+}

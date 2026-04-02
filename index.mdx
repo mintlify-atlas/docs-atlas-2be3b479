@@ -1,97 +1,73 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Learn Coding Agent"
+description: "A deep research repository reverse-engineering the architecture, internals, and hidden features of Claude Code — Anthropic's CLI coding agent."
 ---
 
-## Setting up
+This repository contains comprehensive research and architectural analysis of Claude Code (v2.1.88), compiled entirely from publicly available online references and community discussions. The goal is to help developers understand how production AI coding agents are built, how their internal systems work, and what patterns make them production-ready.
 
-Get your documentation site up and running in minutes.
+<Note>
+All content is provided strictly for technical research, study, and educational exchange. Commercial use is strictly prohibited. This project does not reflect official Anthropic documentation.
+</Note>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+## Explore the research
 
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="diagram-project" href="/architecture-overview">
+    Understand the entry layer, query engine, tool system, and service architecture in one diagram-driven page.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="The Agent Loop" icon="arrows-rotate" href="/core/agent-loop">
+    Deep dive into the core while-true loop: how Claude API calls, tool dispatch, and result accumulation work.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Tool System" icon="wrench" href="/core/tool-system">
+    Explore the 40+ built-in tools, the buildTool factory, and the full tool lifecycle from validation to rendering.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Permission System" icon="shield-halved" href="/core/permission-system">
+    Trace a tool call through hooks, allow/deny rules, interactive prompts, and tool-specific authorization.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
-
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Multi-Agent Architecture" icon="network-wired" href="/advanced/multi-agent">
+    Fork agents, remote agents, in-process teammates, swarm mode, and the task board communication protocol.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="MCP Integration" icon="plug" href="/advanced/mcp-integration">
+    How the Model Context Protocol is wired in: server discovery, OAuth, tool naming, and resource listing.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="12 Harness Mechanisms" icon="layer-group" href="/harness/overview">
+    The 12 progressive production mechanisms that Claude Code layers on top of the minimal agent loop.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Deep Analysis Reports" icon="magnifying-glass" href="/analysis/telemetry-and-privacy">
+    Five in-depth reports: telemetry, hidden features, undercover mode, remote killswitches, and the future roadmap.
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Key findings at a glance
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={3}>
+  <Card title="40+ Built-in Tools" icon="toolbox" href="/reference/tool-inventory">
+    File ops, search, shell execution, web fetch, MCP, agents, planning, and system tools all documented.
+  </Card>
+  <Card title="Two Analytics Pipelines" icon="chart-line" href="/analysis/telemetry-and-privacy">
+    First-party OpenTelemetry logging and Datadog, with no UI-exposed opt-out for direct API users.
+  </Card>
+  <Card title="KAIROS: Autonomous Mode" icon="robot" href="/analysis/future-roadmap">
+    Fully autonomous agent mode found in source: tick heartbeats, proactive commits, push notifications.
+  </Card>
+</CardGroup>
+
+## How this research is organized
+
+<Steps>
+  <Step title="Start with the architecture overview">
+    The [Architecture Overview](/architecture-overview) page gives you a map of all major subsystems and how they connect — from the CLI entry point to the streaming API call.
+  </Step>
+  <Step title="Go deep on core systems">
+    Work through [Core Architecture](/core/agent-loop): the agent loop, tool system, permission system, and context management. These are the building blocks everything else depends on.
+  </Step>
+  <Step title="Explore advanced systems">
+    [Advanced Systems](/advanced/multi-agent) covers multi-agent coordination, MCP integration, the bridge layer, session persistence, and application state management.
+  </Step>
+  <Step title="Read the deep analysis reports">
+    The [Deep Analysis](/analysis/telemetry-and-privacy) tab contains five research reports examining Claude Code's internals: telemetry, hidden codenames, undercover mode, remote control, and what the roadmap reveals.
+  </Step>
+</Steps>

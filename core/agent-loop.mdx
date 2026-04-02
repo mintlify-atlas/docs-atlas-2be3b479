@@ -1,0 +1,189 @@
+---
+title: "The Agent Loop"
+description: How the core while-true loop works in Claude Code
+---
+
+At its heart, Claude Code is a while-true loop. Every feature — streaming, permissions, compaction, sub-agents — is a layer wrapped around this minimal pattern.
+
+## The minimal agent loop
+
+```text
+                THE CORE LOOP
+                =============
+
+    User --> messages[] --> Claude API --> response
+                                          |
+                                stop_reason == "tool_use"?
+                               /                          \
+                             yes                           no
+                              |                             |
+                        execute tools                    return text
+                        append tool_result
+                        loop back -----------------> messages[]
+
+
+    That is the minimal agent loop. Claude Code wraps this loop
+    with a production-grade harness: permissions, streaming,
+    concurrency, compaction, sub-agents, persistence, and MCP.
+```
+
+The `stop_reason` field in the Claude API response is the branch condition. When Claude wants to call a tool, it returns `stop_reason == "tool_use"`. The loop executes the tool, appends the result as a `tool_result` message, and calls the API again with the updated `messages[]`. When Claude is done, it returns `stop_reason == "end_turn"` and the loop exits.
+
+## Key source files
+
+| File | Size | Role |
+|------|------|------|
+| `query.ts` | ~785 KB | Main agent loop implementation — the largest file in the codebase |
+| `QueryEngine.ts` | — | SDK/headless query lifecycle engine; wraps `query()` |
+| `main.tsx` | 4,683 lines | REPL bootstrap; connects the UI to the query engine |
+
+<Note>
+`query.ts` is the largest single file at ~785 KB. It contains the streaming logic, tool dispatch, compaction triggers, and all the production harness code that surrounds the core loop.
+</Note>
+
+## The full query lifecycle
+
+<Steps>
+  <Step title="processUserInput()">
+    The raw user input (a prompt or slash command) is parsed. Slash commands like `/compact` or `/clear` are handled here and may short-circuit the loop entirely. For normal prompts, a `UserMessage` is constructed and added to `messages[]`.
+  </Step>
+  <Step title="fetchSystemPromptParts()">
+    The system prompt is assembled dynamically on every turn. Each registered tool contributes a `prompt()` section. `CLAUDE.md` memory files are loaded lazily from the current directory tree. The result is a structured system prompt passed with every API request.
+  </Step>
+  <Step title="recordTranscript()">
+    The user message is persisted to disk in JSONL format before the API call. User messages are written with `await` (blocking) for crash recovery. Assistant messages are written fire-and-forget to avoid blocking the response stream.
+  </Step>
+  <Step title="normalizeMessagesForAPI()">
+    The in-memory `messages[]` array is sanitized before each API call: UI-only metadata fields are stripped, image attachments are encoded, and if compaction has been triggered the messages are replaced with a summary. The result is the payload sent to the Claude API.
+  </Step>
+  <Step title="Claude API (streaming)">
+    A streaming POST to `/v1/messages` is made with the normalized messages, tool definitions, and system prompt. The response is consumed as a server-sent event stream.
+  </Step>
+  <Step title="Stream event processing">
+    Events arrive in sequence: `message_start` → one or more `content_block_delta` events → `message_stop`. Text deltas are yielded immediately to the consumer (the REPL or SDK caller). Tool use blocks accumulate until complete.
+  </Step>
+  <Step title="stop_reason branching">
+    When `message_stop` arrives, the `stop_reason` field determines the next action:
+    - `"end_turn"` — yield the final result message and exit the loop.
+    - `"tool_use"` — hand the tool call(s) to `StreamingToolExecutor` and continue.
+  </Step>
+  <Step title="StreamingToolExecutor">
+    The executor partitions tool calls into two groups: those that are `isConcurrencySafe()` (can run in parallel) and those that must run serially. Concurrent-safe tools are executed together; serial tools queue one at a time.
+  </Step>
+  <Step title="canUseTool() — permission check">
+    Before any tool executes, `canUseTool()` is called. This runs the full permission pipeline: PreToolUse hooks → permission rules → interactive prompt (if no rule matches). See the [Permission System](/core/permission-system) for the full flow.
+  </Step>
+  <Step title="tool.call()">
+    If permission is granted, the tool's `call()` method executes — reading a file, running a bash command, fetching a URL, etc. If permission is denied, a `tool_result` with an error message is appended instead.
+  </Step>
+  <Step title="append tool_result and loop back">
+    The tool's output is wrapped in a `tool_result` message and appended to `messages[]`. `recordTranscript()` is called again to persist it. The loop then returns to `normalizeMessagesForAPI()` for the next API call.
+  </Step>
+</Steps>
+
+## Data flow diagram
+
+The complete data flow for a single query, from user input to final result:
+
+```text
+ USER INPUT (prompt / slash command)
+     │
+     ▼
+ processUserInput()                ← parse /commands, build UserMessage
+     │
+     ▼
+ fetchSystemPromptParts()          ← tools → prompt sections, CLAUDE.md memory
+     │
+     ▼
+ recordTranscript()                ← persist user message to disk (JSONL)
+     │
+     ▼
+ ┌─→ normalizeMessagesForAPI()     ← strip UI-only fields, compact if needed
+ │   │
+ │   ▼
+ │   Claude API (streaming)        ← POST /v1/messages with tools + system prompt
+ │   │
+ │   ▼
+ │   stream events                 ← message_start → content_block_delta → message_stop
+ │   │
+ │   ├─ text block ──────────────→ yield to consumer (SDK / REPL)
+ │   │
+ │   └─ tool_use block?
+ │       │
+ │       ▼
+ │   StreamingToolExecutor         ← partition: concurrent-safe vs serial
+ │       │
+ │       ▼
+ │   canUseTool()                  ← permission check (hooks + rules + UI prompt)
+ │       │
+ │       ├─ DENY ────────────────→ append tool_result(error), continue loop
+ │       │
+ │       └─ ALLOW
+ │           │
+ │           ▼
+ │       tool.call()               ← execute the tool (Bash, Read, Edit, etc.)
+ │           │
+ │           ▼
+ │       append tool_result        ← push to messages[], recordTranscript()
+ │           │
+ └─────────┘                      ← loop back to API call
+     │
+     ▼ (stop_reason != "tool_use")
+ yield result message              ← final text, usage, cost, session_id
+```
+
+## The `stop_reason == "tool_use"` branch
+
+This single condition is what separates an agent from a chatbot. When `stop_reason` is `"tool_use"`, Claude's response contains one or more `tool_use` content blocks, each with:
+
+- `id` — a unique call ID used to correlate the `tool_result`
+- `name` — the tool to invoke (e.g., `"BashTool"`, `"FileReadTool"`)
+- `input` — the arguments as a JSON object matching the tool's input schema
+
+The loop **must** append a `tool_result` block for every `tool_use` block before the next API call. The Claude API will reject a request where `tool_use` blocks exist in the conversation without matching `tool_result` responses.
+
+<Tip>
+Claude can emit multiple `tool_use` blocks in a single response. `StreamingToolExecutor` handles batching: tools marked `isConcurrencySafe()` run in parallel, reducing wall-clock latency for independent operations like reading multiple files simultaneously.
+</Tip>
+
+## Architecture overview
+
+The query engine sits between the entry layer and the tool/service/state layers:
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                         ENTRY LAYER                                 │
+│  cli.tsx ──> main.tsx ──> REPL.tsx (interactive)                   │
+│                     └──> QueryEngine.ts (headless/SDK)              │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       QUERY ENGINE                                  │
+│  submitMessage(prompt) ──> AsyncGenerator<SDKMessage>               │
+│    │                                                                │
+│    ├── fetchSystemPromptParts()    ──> assemble system prompt       │
+│    ├── processUserInput()          ──> handle /commands             │
+│    ├── query()                     ──> main agent loop              │
+│    │     ├── StreamingToolExecutor ──> parallel tool execution      │
+│    │     ├── autoCompact()         ──> context compression          │
+│    │     └── runTools()            ──> tool orchestration           │
+│    └── yield SDKMessage            ──> stream to consumer           │
+└──────────────────────────────┬──────────────────────────────────────┘
+```
+
+`QueryEngine.ts` exposes the loop as an `AsyncGenerator<SDKMessage>`, allowing both the interactive REPL and the headless SDK to consume the same stream of events.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Tool System" icon="wrench" href="/core/tool-system">
+    How the buildTool factory and tool interface work
+  </Card>
+  <Card title="Permission System" icon="shield" href="/core/permission-system">
+    How canUseTool() decides whether a tool may run
+  </Card>
+  <Card title="Context Management" icon="layers" href="/core/context-management">
+    How autoCompact keeps the context window from filling up
+  </Card>
+</Columns>

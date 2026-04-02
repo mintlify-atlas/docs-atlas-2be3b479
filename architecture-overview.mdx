@@ -1,0 +1,189 @@
+---
+title: "Architecture Overview"
+description: "A top-down map of every major subsystem in Claude Code: entry layer, query engine, tool system, service layer, state management, task system, and bridge layer."
+---
+
+Claude Code is organized into seven interconnected layers. This page maps all of them, reproduces the canonical ASCII diagram from the source analysis, and links to the dedicated deep-dive page for each subsystem.
+
+## Full architecture diagram
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                         ENTRY LAYER                                 │
+│  cli.tsx ──> main.tsx ──> REPL.tsx (interactive)                   │
+│                     └──> QueryEngine.ts (headless/SDK)              │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       QUERY ENGINE                                  │
+│  submitMessage(prompt) ──> AsyncGenerator<SDKMessage>               │
+│    │                                                                │
+│    ├── fetchSystemPromptParts()    ──> assemble system prompt       │
+│    ├── processUserInput()          ──> handle /commands             │
+│    ├── query()                     ──> main agent loop              │
+│    │     ├── StreamingToolExecutor ──> parallel tool execution       │
+│    │     ├── autoCompact()         ──> context compression          │
+│    │     └── runTools()            ──> tool orchestration           │
+│    └── yield SDKMessage            ──> stream to consumer           │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                 ▼
+┌──────────────────┐ ┌─────────────────┐ ┌──────────────────┐
+│   TOOL SYSTEM    │ │  SERVICE LAYER  │ │   STATE LAYER    │
+│                  │ │                 │ │                  │
+│ Tool Interface   │ │ api/claude.ts   │ │ AppState Store   │
+│  ├─ call()       │ │  API client     │ │  ├─ permissions  │
+│  ├─ validate()   │ │ compact/        │ │  ├─ fileHistory  │
+│  ├─ checkPerms() │ │  auto-compact   │ │  ├─ agents       │
+│  ├─ render()     │ │ mcp/            │ │  └─ fastMode     │
+│  └─ prompt()     │ │  MCP protocol   │ │                  │
+│                  │ │ analytics/      │ │ React Context    │
+│ 40+ Built-in:    │ │  telemetry      │ │  ├─ useAppState  │
+│  ├─ BashTool     │ │ tools/          │ │  └─ useSetState  │
+│  ├─ FileRead     │ │  executor       │ │                  │
+│  ├─ FileEdit     │ │ plugins/        │ └──────────────────┘
+│  ├─ Glob/Grep    │ │  loader         │
+│  ├─ AgentTool    │ │ settingsSync/   │
+│  ├─ WebFetch     │ │  cross-device   │
+│  └─ MCPTool      │ │ oauth/          │
+│                  │ │  auth flow      │
+└──────────────────┘ └─────────────────┘
+              │                │
+              ▼                ▼
+┌──────────────────┐ ┌─────────────────┐
+│   TASK SYSTEM    │ │   BRIDGE LAYER  │
+│                  │ │                 │
+│ Task Types:      │ │ bridgeMain.ts   │
+│  ├─ local_bash   │ │  session mgmt   │
+│  ├─ local_agent  │ │ bridgeApi.ts    │
+│  ├─ remote_agent │ │  HTTP client    │
+│  ├─ in_process   │ │ workSecret.ts   │
+│  ├─ dream        │ │  auth tokens    │
+│  └─ workflow     │ │ sessionRunner   │
+│                  │ │  process spawn  │
+│ ID: prefix+8chr  │ └─────────────────┘
+│  b=bash a=agent  │
+│  r=remote t=team │
+└──────────────────┘
+```
+
+## Layer-by-layer breakdown
+
+### 1. Entry layer
+
+The application starts at `entrypoints/cli.tsx`, which handles version flags, help output, and daemon lifecycle. From there it hands off to `src/main.tsx` (4,683 lines), the REPL bootstrap that wires together the terminal UI, React/Ink rendering, and session initialization.
+
+Two paths diverge from `main.tsx`:
+
+- **`REPL.tsx`** — Interactive terminal mode. Renders the prompt input, message history, permission dialogs, and status indicators in a React/Ink component tree.
+- **`QueryEngine.ts`** — Headless/SDK mode. Exposes a `submitMessage()` method that returns an `AsyncGenerator<SDKMessage>`, making it consumable by any caller (tests, SDK consumers, bridge sessions) without a terminal.
+
+### 2. Query engine
+
+`QueryEngine.ts` is the coordination layer between the entry point and the agent loop. Every query flows through these stages:
+
+1. **`fetchSystemPromptParts()`** — Assembles the system prompt from tool descriptions, permission context, and any loaded `CLAUDE.md` memory files.
+2. **`processUserInput()`** — Parses slash commands and builds the structured `UserMessage`.
+3. **`query()`** — The main agent loop in `query.ts` (785KB, the largest file in the codebase). Calls the Claude API, handles streaming events, dispatches tool use, and loops until `stop_reason` is not `tool_use`.
+
+Inside `query()`, three components handle the tool execution phase:
+
+- **`StreamingToolExecutor`** — Partitions tools into concurrency-safe (can run in parallel) and serial (must run sequentially) groups, then manages execution lifecycle.
+- **`autoCompact()`** — Monitors token usage and triggers context compression when the window budget is exceeded.
+- **`runTools()`** — Orchestrates the actual `tool.call()` dispatch and result accumulation.
+
+### 3. Tool system
+
+Every tool in Claude Code is built with `buildTool()`, a factory function that enforces a standard lifecycle interface. The interface covers:
+
+- **Validation** — `validateInput()` rejects malformed arguments before any permission check runs.
+- **Authorization** — `checkPermissions()` applies tool-specific rules (e.g., path sandboxing for file tools).
+- **Execution** — `call()` performs the operation and returns a typed result.
+- **Capabilities** — `isConcurrencySafe()`, `isReadOnly()`, `isDestructive()`, and `interruptBehavior()` tell the executor how to schedule and handle the tool.
+- **Rendering** — `renderToolUseMessage()`, `renderToolResultMessage()`, and `renderToolUseProgressMessage()` produce the React/Ink terminal output.
+- **AI-facing** — `prompt()` and `description()` generate the tool description injected into the Claude API request.
+
+The registry contains 40+ built-in tools across file operations, search, shell execution, web, MCP, agent spawning, planning, task management, and system utilities.
+
+### 4. Service layer
+
+`src/services/` contains the stateless business logic that the agent loop and tools depend on:
+
+| Directory | Responsibility |
+|-----------|---------------|
+| `api/claude.ts` | Streaming API client with retry logic and error categorization |
+| `compact/` | Three-strategy context compression: `autoCompact`, `snipCompact`, `contextCollapse` |
+| `mcp/` | MCP connection manager: server discovery, client lifecycle, OAuth, tool registration |
+| `analytics/` | Telemetry reporting to first-party OpenTelemetry and Datadog; GrowthBook feature flags |
+| `tools/` | `StreamingToolExecutor` and `toolOrchestration.ts` for parallel/serial tool scheduling |
+| `plugins/` | Plugin loader for external tool extensions |
+| `settingsSync/` | Cross-device settings synchronization |
+
+### 5. State layer
+
+Application state lives in `src/state/`:
+
+- **`AppStateStore.ts`** — Defines the `AppState` shape: permission context, file history snapshots, active model, fast mode, speculation state, and attribution tracking.
+- **`AppState.tsx`** — Wraps the store in a React context provider. Exposes `useAppState(selector)` for selector-based subscriptions and `useSetAppState()` for immer-style updates.
+
+The permission context within `AppState` is particularly important: it carries `alwaysAllowRules`, `alwaysDenyRules`, `alwaysAskRules`, and the current `PermissionMode`, which the query engine consults before every tool call.
+
+### 6. Task system
+
+`src/tasks/` implements the concrete task types that the agent loop can spawn and manage:
+
+| Task type | Implementation | Description |
+|-----------|---------------|-------------|
+| `local_bash` | `LocalShellTask/` | Executes shell commands in a subprocess; daemon thread with completion notification |
+| `local_agent` | `LocalAgentTask/` | Spawns a sub-agent with a fresh `messages[]` and isolated context |
+| `remote_agent` | `RemoteAgentTask/` | Delegates to a remote Claude Code instance via the bridge |
+| `in_process` | `InProcessTeammateTask/` | Runs a teammate in the same process using `AsyncLocalStorage` for context isolation |
+| `dream` | `DreamTask/` | Background thinking: slow or speculative operations that inject results on completion |
+| `workflow` | (feature-gated) | Scripted multi-step workflow execution |
+
+Task IDs are prefixed to encode type: `b` for bash, `a` for agent, `r` for remote, `t` for teammate — each followed by 8 random characters.
+
+### 7. Bridge layer
+
+`src/bridge/` connects Claude Code CLI to Claude Desktop, web clients, and remote container sessions:
+
+- **`bridgeMain.ts`** — Session lifecycle manager: spawns CLI child processes, polls status, relays messages, and manages capacity-based wakeup.
+- **`bridgeApi.ts`** — HTTP client for the bridge protocol.
+- **`sessionRunner.ts`** — Handles process spawning and teardown.
+- **`workSecret.ts`** / **`jwtUtils.ts`** — Auth token management and JWT refresh scheduling.
+
+The bridge uses exponential backoff: connection retries from 2 seconds up to 2 minutes; generation retries from 500ms up to 30 seconds.
+
+## Subsystem deep dives
+
+<CardGroup cols={2}>
+  <Card title="Agent Loop" icon="arrows-rotate" href="/core/agent-loop">
+    The while-true loop in `query.ts`: Claude API streaming, tool dispatch, result accumulation, and the data flow through a single query lifecycle.
+  </Card>
+  <Card title="Tool System" icon="wrench" href="/core/tool-system">
+    The `buildTool()` factory, full tool lifecycle, the complete inventory of 40+ tools, and how concurrency safety is determined.
+  </Card>
+  <Card title="Permission System" icon="shield-halved" href="/core/permission-system">
+    The four-stage permission pipeline: input validation, pre-tool hooks, allow/deny/ask rules, and interactive prompts.
+  </Card>
+  <Card title="Context Management" icon="compress" href="/core/context-management">
+    The three compression strategies — `autoCompact`, `snipCompact`, and `contextCollapse` — and how the context window budget is managed.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Multi-Agent" icon="network-wired" href="/advanced/multi-agent">
+    Fork agents, remote agents, in-process teammates, swarm mode with auto-claim, and the task board and `SendMessageTool` communication protocol.
+  </Card>
+  <Card title="MCP Integration" icon="plug" href="/advanced/mcp-integration">
+    Server discovery across five transports (stdio, SSE, HTTP, WebSocket, in-process), OAuth 2.0 auth, and the `mcp__<server>__<tool>` naming convention.
+  </Card>
+  <Card title="Bridge Layer" icon="bridge" href="/advanced/bridge-layer">
+    How Claude Desktop and web clients connect to CLI sessions: JWT auth, work secret exchange, session lifecycle, and backoff strategy.
+  </Card>
+  <Card title="Session Persistence" icon="database" href="/advanced/session-persistence">
+    The append-only JSONL session log, the `--continue` / `--resume` / `--fork-session` resume flows, and the blocking vs. fire-and-forget write strategy.
+  </Card>
+</CardGroup>

@@ -1,0 +1,164 @@
+---
+title: "Context Management"
+description: How Claude Code manages the context window budget and compresses history
+---
+
+The Claude API has a finite context window. In a long coding session, the `messages[]` array grows steadily — every user message, assistant response, tool call, and tool result adds tokens. Left unchecked, the conversation will eventually exceed the model's limit and the agent loop will fail.
+
+Claude Code addresses this with a three-strategy compression system implemented in `services/compact/`.
+
+## Context window budget
+
+At any point in a session, the context window is consumed by three regions:
+
+```text
+    CONTEXT WINDOW BUDGET
+    ═════════════════════
+
+    ┌─────────────────────────────────────────────────────┐
+    │  System Prompt (tools, permissions, CLAUDE.md)      │
+    │  ══════════════════════════════════════════════      │
+    │                                                     │
+    │  Conversation History                               │
+    │  ┌─────────────────────────────────────────────┐    │
+    │  │ [compacted summary of older messages]        │    │
+    │  │ ═══════════════════════════════════════════  │    │
+    │  │ [compact_boundary marker]                    │    │
+    │  │ ─────────────────────────────────────────── │    │
+    │  │ [recent messages — full fidelity]            │    │
+    │  │ user → assistant → tool_use → tool_result   │    │
+    │  └─────────────────────────────────────────────┘    │
+    │                                                     │
+    │  Current Turn (user + assistant response)            │
+    └─────────────────────────────────────────────────────┘
+```
+
+The system prompt is dynamic and rebuilt on every turn via `fetchSystemPromptParts()`. Its size depends on the number of enabled tools, the content of `CLAUDE.md` files, and any injected context. This region is not compressible but is kept as small as possible by loading knowledge on demand (via `SkillTool`) rather than front-loading everything into the system prompt.
+
+The conversation history is the primary target for compression. After compaction, it is split into two parts: a compact summary of older turns (high information density, low token cost) and the recent messages in full fidelity.
+
+## Three compression strategies
+
+Claude Code implements three distinct strategies, each triggered under different conditions:
+
+```text
+THREE COMPRESSION STRATEGIES:
+├─ autoCompact     → triggers when token count exceeds threshold
+│                     summarizes old messages via a compact API call
+├─ snipCompact     → removes zombie messages and stale markers
+│                     (HISTORY_SNIP feature flag)
+└─ contextCollapse → restructures context for efficiency
+                     (CONTEXT_COLLAPSE feature flag)
+```
+
+### autoCompact
+
+The primary strategy. `autoCompact()` is called inside the agent loop whenever the token count of the current `messages[]` exceeds a configured threshold. It does not truncate blindly — it makes a separate Claude API call to generate a semantic summary of the older messages, then replaces those messages with the summary.
+
+The token threshold is calculated dynamically based on the model's declared context window size, with a buffer reserved for the current turn and the system prompt.
+
+### snipCompact
+
+A lighter-weight strategy gated behind the `HISTORY_SNIP` feature flag. `snipCompact` scans `messages[]` for "zombie" entries — messages that are structurally present but semantically dead:
+
+- Orphaned `tool_result` blocks whose corresponding `tool_use` has already been compacted away
+- Stale compaction marker artifacts from a previous compact that was immediately followed by another
+
+These entries consume tokens without contributing meaningful context. `snipCompact` removes them without making any API calls, making it fast enough to run opportunistically.
+
+### contextCollapse
+
+The most aggressive strategy, gated behind the `CONTEXT_COLLAPSE` feature flag. Instead of summarizing old messages, `contextCollapse` restructures the entire context — reordering, deduplicating, and reformatting messages to minimize token usage while preserving the information the model needs to continue working effectively.
+
+<Info>
+`snipCompact` and `contextCollapse` are feature-flag gated and not available in the public build by default. They are compiled out at build time using Bun's dead code elimination when the flags are disabled. `autoCompact` is always active.
+</Info>
+
+## The compaction flow
+
+<Steps>
+  <Step title="Token threshold exceeded">
+    After each API response, the agent loop checks the token count returned in the API usage metadata. When the total (input tokens + estimated future turns) approaches the model's context limit, `autoCompact()` is triggered before the next `normalizeMessagesForAPI()` call.
+  </Step>
+  <Step title="getMessagesAfterCompactBoundary()">
+    The compaction service first finds the existing compact boundary in `messages[]`, if one exists from a previous compaction. Messages before the boundary are already summarized. Only messages after the boundary — the "recent" region — are candidates for the next compaction pass.
+
+    This means compaction is incremental: each pass summarizes the new accumulation since the last boundary, rather than re-summarizing the entire history every time.
+  </Step>
+  <Step title="Older messages sent to Claude API (summarize)">
+    The messages to be compacted are sent to the Claude API in a separate request with a summarization instruction. This is a standard Claude API call — not a special endpoint — using the same model as the main agent loop.
+
+    The summary prompt asks Claude to capture: the overall task context, key decisions made, files modified, commands run, and any important findings. The goal is a summary dense enough that the agent can continue working without the full history.
+  </Step>
+  <Step title="Compact summary returned">
+    The API returns a compact summary as a text block. This summary is shorter than the original messages — typically by a factor of 5–20x depending on how many tool calls were involved.
+  </Step>
+  <Step title="Reconstruct messages[]">
+    The old messages are replaced. The new `messages[]` structure is:
+
+    ```text
+    [summary message]
+    + [compact_boundary system marker]
+    + [recent messages — full fidelity]
+    ```
+
+    The `compact_boundary` marker is a system message that serves two purposes: it tells `getMessagesAfterCompactBoundary()` where to split on the next compaction, and it is persisted to the JSONL transcript so sessions can be resumed correctly after compaction.
+  </Step>
+</Steps>
+
+## The `compact_boundary` marker
+
+The boundary marker is persisted to the JSONL session transcript as a system message:
+
+```json
+{"type": "system", "subtype": "compact_boundary", "session_id": "...", "timestamp": "..."}
+```
+
+When a session is resumed with `--continue` or `--resume`, the session loader calls `getLastSessionLog()`, parses the JSONL file, and rebuilds `messages[]`. The compact boundary marker tells the resume logic which messages are already summarized, preventing a resumed session from re-summarizing the summary.
+
+<Tip>
+You can trigger compaction manually at any time with the `/compact` slash command. This is useful before starting a new major task within the same session — compacting the previous task's tool call history frees up context budget for the next one.
+</Tip>
+
+## Compaction flow diagram
+
+```text
+    COMPACTION FLOW:
+    messages[] ──> getMessagesAfterCompactBoundary()
+                        │
+                        ▼
+                  older messages ──> Claude API (summarize) ──> compact summary
+                        │
+                        ▼
+                  [summary] + [compact_boundary] + [recent messages]
+```
+
+## Session persistence and transcripts
+
+Compaction interacts directly with the session persistence layer. Transcripts are stored at:
+
+```text
+~/.claude/projects/<hash>/sessions/<session-id>.jsonl
+```
+
+Each line is a JSON object representing one message or event:
+
+```jsonl
+{"type":"user","content":"..."}
+{"type":"assistant","content":"..."}
+{"type":"progress","tool_use_id":"...","content":"..."}
+{"type":"system","subtype":"compact_boundary","session_id":"..."}
+```
+
+The `compact_boundary` line is what makes resumed sessions work correctly after compaction. Without it, a resumed session would either re-process summarized history (wasting tokens) or lose the context of what happened before the summary.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Agent loop" icon="rotate-cw" href="/core/agent-loop">
+    Where autoCompact() is triggered in the query lifecycle
+  </Card>
+  <Card title="Tool system" icon="wrench" href="/core/tool-system">
+    How the system prompt is assembled from tool prompt() sections
+  </Card>
+</Columns>

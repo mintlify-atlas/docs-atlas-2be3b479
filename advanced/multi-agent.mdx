@@ -1,0 +1,193 @@
+---
+title: "Multi-Agent Architecture"
+description: "Sub-agent spawning, remote agents, teammates, and swarm mode"
+---
+
+Claude Code supports running multiple agents simultaneously — each with its own message history, working directory, and execution context. The multi-agent system is built on three agent types and four spawn modes, coordinated through a shared task board.
+
+## Architecture overview
+
+```text
+                        MAIN AGENT
+                        ==========
+                            │
+            ┌───────────────┼───────────────┐
+            ▼               ▼               ▼
+     ┌──────────────┐ ┌──────────┐ ┌──────────────┐
+     │  FORK AGENT  │ │ REMOTE   │ │ IN-PROCESS   │
+     │              │ │ AGENT    │ │ TEAMMATE     │
+     │ Fork process │ │ Bridge   │ │ Same process │
+     │ Shared cache │ │ session  │ │ Async context│
+     │ Fresh msgs[] │ │ Isolated │ │ Shared state │
+     └──────────────┘ └──────────┘ └──────────────┘
+
+    SPAWN MODES:
+    ├─ default    → in-process, shared conversation
+    ├─ fork       → child process, fresh messages[], shared file cache
+    ├─ worktree   → isolated git worktree + fork
+    └─ remote     → bridge to Claude Code Remote / container
+
+    COMMUNICATION:
+    ├─ SendMessageTool     → agent-to-agent messages
+    ├─ TaskCreate/Update   → shared task board
+    └─ TeamCreate/Delete   → team lifecycle management
+
+    SWARM MODE (feature-gated):
+    ┌─────────────────────────────────────────────┐
+    │  Lead Agent                                 │
+    │    ├── Teammate A ──> claims Task 1         │
+    │    ├── Teammate B ──> claims Task 2         │
+    │    └── Teammate C ──> claims Task 3         │
+    │                                             │
+    │  Shared: task board, message inbox          │
+    │  Isolated: messages[], file cache, cwd      │
+    └─────────────────────────────────────────────┘
+```
+
+## Agent types
+
+<Tabs>
+  <Tab title="Fork Agent">
+    A fork agent runs in a **child process** that is forked from the parent. It shares the parent's file cache but starts with a completely fresh `messages[]` array, preventing conversation history from leaking into the sub-task context.
+
+    **Characteristics:**
+    - Spawned as a child process via `forkSubagent.ts`
+    - Inherits the parent's file read cache (performance optimization)
+    - Fresh `messages[]` — no conversation history bleed
+    - Isolated stdin/stdout; results surface back via the `AgentTool` return value
+
+    **Key source files:**
+    - `tools/AgentTool/` — spawn logic and input schema
+    - `tasks/LocalAgentTask/` — task lifecycle management
+
+    **When to use:** Large sub-tasks that need a clean context, or any task where the parent conversation history would pollute the sub-agent's reasoning.
+  </Tab>
+  <Tab title="Remote Agent">
+    A remote agent runs in a **separate Claude Code process** reachable through the bridge layer. The agent is fully isolated — separate process, separate memory, separate file system view (unless shared volumes are configured).
+
+    **Characteristics:**
+    - Connected via `bridgeMain.ts` session lifecycle
+    - Completely isolated: separate process, messages[], and cwd
+    - Communicates over HTTP with JWT authentication
+    - Suitable for container-based or cloud-hosted execution environments
+
+    **Key source files:**
+    - `tasks/RemoteAgentTask/` — remote task wrapper
+    - `bridge/bridgeMain.ts` — session manager
+
+    **When to use:** Tasks that require an isolated execution environment, container sandboxing, or running on a different machine entirely.
+  </Tab>
+  <Tab title="In-Process Teammate">
+    An in-process teammate runs **in the same Node.js process** as the main agent, using `AsyncLocalStorage` to maintain separate execution contexts. Teammates share certain application state with the main agent but maintain isolated `messages[]` arrays.
+
+    **Characteristics:**
+    - Same process, lower spawn overhead than forking
+    - Uses `AsyncLocalStorage` for per-agent context isolation
+    - Shares application state (permissions, settings)
+    - Async mailbox for inter-agent communication via `SendMessageTool`
+
+    **Key source files:**
+    - `tasks/InProcessTeammateTask/` — teammate task implementation
+    - `utils/swarm/` — swarm coordination utilities
+
+    **When to use:** Lightweight parallel tasks where process isolation is not needed, or when teammates need to share application-level state with the lead agent.
+  </Tab>
+</Tabs>
+
+## Spawn modes
+
+The `AgentTool` accepts a `mode` parameter that controls how the sub-agent process is created:
+
+| Mode | Process | File Cache | Message History | Git Worktree |
+|------|---------|------------|-----------------|--------------|
+| `default` | In-process | Shared | Shared | Current |
+| `fork` | Child process | Shared | Fresh `[]` | Current |
+| `worktree` | Child process | Isolated | Fresh `[]` | Isolated |
+| `remote` | Remote bridge | Isolated | Fresh `[]` | Remote |
+
+<Note>
+`worktree` mode creates an isolated git worktree before forking, so each sub-agent has its own working directory. This prevents file conflicts when multiple agents work on the same repository simultaneously.
+</Note>
+
+## Communication mechanisms
+
+Agents coordinate through three primitives:
+
+### SendMessageTool
+
+Direct agent-to-agent messaging. The sending agent specifies a target agent ID; the receiving agent's async mailbox delivers the message on its next iteration. This single request-response pattern drives all inter-agent negotiation.
+
+```typescript
+// Agent sends a message to a teammate
+SendMessageTool.call({
+  agentId: "t_abc12345",
+  message: "Task 3 is complete. Ready for review.",
+})
+```
+
+### TaskCreate / TaskUpdate
+
+A file-backed shared task board. Any agent can create, claim, update, or complete tasks. The board persists to disk, surviving process restarts.
+
+```typescript
+// Lead agent creates tasks
+TaskCreateTool.call({ title: "Refactor auth module", status: "pending" })
+TaskCreateTool.call({ title: "Write tests for auth", status: "pending" })
+
+// Teammate claims a task
+TaskUpdateTool.call({ id: "task_001", status: "in_progress", agentId: "t_xyz" })
+```
+
+### TeamCreate / TeamDelete
+
+Manages the lifecycle of teammate pools. `TeamCreateTool` spawns a set of in-process teammates and returns their IDs. `TeamDeleteTool` tears them down when the task is complete.
+
+## Swarm mode
+
+<Info>
+Swarm mode is feature-gated and controlled by the `COORDINATOR_MODE` compile-time flag. It may not be active in all builds.
+</Info>
+
+In swarm mode, the lead agent spawns a pool of teammates and publishes tasks to the shared board. Teammates run an idle cycle — polling the task board and auto-claiming available tasks without requiring the lead to assign work explicitly.
+
+**Isolation guarantees in swarm:**
+- Each teammate has its own `messages[]` array
+- Each teammate has its own file read cache
+- Each teammate has its own `cwd`
+- Shared: task board, message inbox
+
+**Key source files:**
+- `utils/swarm/` — swarm coordination utilities
+- coordinator logic: `coordinator/coordinatorMode.ts`
+
+```text
+SWARM IDLE CYCLE (per teammate):
+    poll task board
+         │
+    task available?
+    ├── yes → claim task → execute → update status → loop
+    └── no  → sleep → loop
+```
+
+## Key source files
+
+<Columns cols={2}>
+  <Card title="AgentTool/" icon="robot" href="#">
+    Sub-agent spawning logic and input schema. Defines the `mode` parameter and routes to the correct task implementation.
+  </Card>
+  <Card title="LocalAgentTask/" icon="microchip" href="#">
+    Lifecycle management for local (fork and in-process) agent tasks.
+  </Card>
+  <Card title="RemoteAgentTask/" icon="server" href="#">
+    Wraps the bridge layer to execute agents on remote Claude Code instances.
+  </Card>
+  <Card title="InProcessTeammateTask/" icon="users" href="#">
+    In-process teammate implementation using `AsyncLocalStorage` for context isolation.
+  </Card>
+  <Card title="utils/swarm/" icon="network-wired" href="#">
+    Swarm coordination utilities: task claiming, idle cycle, and team protocols.
+  </Card>
+  <Card title="tasks/DreamTask/" icon="moon" href="#">
+    Background thinking tasks that run daemon threads without blocking the main agent loop.
+  </Card>
+</Columns>

@@ -1,0 +1,133 @@
+---
+title: "Hidden Features & Codenames"
+description: Animal model codenames, obfuscated feature flags, internal vs external user differences, and hidden commands
+---
+
+<Note>
+  This page is based on publicly available source analysis and community research on Claude Code v2.1.88. It is not derived from official Anthropic documentation.
+</Note>
+
+## Overview
+
+Claude Code's source code contains an extensive system of animal-named model codenames, obfuscated feature flags, privileged internal-user behaviors, and undocumented commands. This page documents what the architecture reveals about each of these systems.
+
+<Tabs>
+  <Tab title="Codenames">
+    ## Model codename system
+
+    Anthropic uses animal names as internal model codenames. These are aggressively protected from leaking into external builds through multiple layers of tooling.
+
+    ### Known codenames
+
+    | Codename | Role | Evidence |
+    |----------|------|----------|
+    | **Tengu** (天狗) | Product/telemetry prefix, possibly a model | Used as `tengu_*` prefix for all 250+ analytics events and feature flags |
+    | **Capybara** (水豚) | Sonnet-series model, currently at v8 | `capybara-v2-fast[1m]`, prompt patches for v8 behavior issues |
+    | **Fennec** (耳廓狐) | Predecessor to Opus 4.6 | Migration: `fennec-latest` → `opus` |
+    | **Numbat** (袋食蚁兽) | Next model launch | Comment: "Remove this section when we launch numbat" |
+
+    ### Codename protection
+
+    The undercover mode system explicitly lists protected codenames that must never appear in external-facing output (`src/utils/undercover.ts:48-49`):
+
+    ```typescript
+    NEVER include in commit messages or PR descriptions:
+    - Internal model codenames (animal names like Capybara, Tengu, etc.)
+    - Unreleased model version numbers (e.g., opus-4-7, sonnet-4-8)
+    ```
+
+    The build system uses `scripts/excluded-strings.txt` to scan for leaked codenames in the compiled bundle. To evade this scan, buddy system species names are encoded via `String.fromCharCode()`:
+
+    ```typescript
+    // src/buddy/types.ts:10-13
+    // One species name collides with a model-codename canary in excluded-strings.txt.
+    // The check greps build output (not source), so runtime-constructing the value keeps
+    // the literal out of the bundle while the check stays armed for the actual codename.
+    ```
+
+    The colliding species is **capybara** — it exists as both a virtual pet species and a protected model codename, so it must be constructed at runtime rather than written as a string literal.
+
+    ### Capybara v8 behavior issues
+
+    The codebase reveals specific behavioral problems with the Capybara v8 model that required dedicated workarounds in the source:
+
+    | Issue | Detail | Source |
+    |-------|--------|--------|
+    | Stop sequence false trigger | ~10% rate when `<functions>` appears at prompt tail | `src/utils/messages.ts:2141` |
+    | Empty tool_result | Causes zero output — dedicated handling required | `src/utils/toolResultStorage.ts:281` |
+    | Over-commenting | Requires dedicated anti-comment prompt patches | `src/constants/prompts.ts:204` |
+    | High false-claims rate | v8: 29–30% FC rate vs v4's 16.7% | `src/constants/prompts.ts:237` |
+    | Insufficient verification | Requires a "thoroughness counterweight" prompt | `src/constants/prompts.ts:210` |
+  </Tab>
+
+  <Tab title="Feature Flags">
+    ## Feature flag naming convention
+
+    All feature flags use the `tengu_` prefix followed by **random word pairs** (typically adjective/material + nature/object). This naming scheme deliberately obscures each flag's purpose from external observers.
+
+    | Flag | Purpose |
+    |------|---------|
+    | `tengu_onyx_plover` | Auto Dream (background memory consolidation) |
+    | `tengu_coral_fern` | memdir feature |
+    | `tengu_moth_copse` | Secondary memdir switch |
+    | `tengu_herring_clock` | Team memory |
+    | `tengu_passport_quail` | Path feature |
+    | `tengu_slate_thimble` | Tertiary memdir switch |
+    | `tengu_sedge_lantern` | Away Summary |
+    | `tengu_frond_boric` | Analytics killswitch |
+    | `tengu_amber_quartz_disabled` | Voice mode killswitch |
+    | `tengu_amber_flint` | Agent teams enabler (multi-agent swarm gate) |
+    | `tengu_hive_evidence` | Verification agent |
+    | `tengu_penguins_off` | Fast mode (penguin mode) killswitch |
+    | `tengu_marble_sandcastle` | Fast mode secondary killswitch |
+    | `tengu_ant_model_override` | Internal model override (ant users only) |
+
+    The total flag count exceeds 250 across analytics events and feature toggles. No flag names hint at their actual function — the obfuscation is intentional.
+  </Tab>
+
+  <Tab title="Internal vs External">
+    ## Internal vs external user differences
+
+    Anthropic employees are identified by `USER_TYPE === 'ant'`. This single environment variable gates access to substantially better prompts, tools, and behaviors.
+
+    ### Prompt differences (`src/constants/prompts.ts`)
+
+    | Dimension | External users | Internal (ant) users |
+    |-----------|---------------|----------------------|
+    | Output style | "Be extra concise" | "Err on the side of more explanation" |
+    | False-claims mitigation | None | Dedicated Capybara v8 patches |
+    | Numeric length anchors | None | "≤25 words between tools, ≤100 words final" |
+    | Verification agent | None | Required for non-trivial changes |
+    | Comment guidance | Generic | Dedicated anti-over-commenting prompt |
+    | Proactive correction | None | "If user has misconception, say so" |
+
+    ### Exclusive tool access
+
+    Internal users have access to tools that are not available to external users:
+
+    | Tool | Description |
+    |------|-------------|
+    | `REPLTool` | Interactive REPL mode |
+    | `SuggestBackgroundPRTool` | Background PR suggestions |
+    | `TungstenTool` | Internal performance monitoring panel |
+    | `VerifyPlanExecutionTool` | Plan execution verification |
+    | Agent nesting | Agents spawning sub-agents |
+  </Tab>
+
+  <Tab title="Hidden Commands">
+    ## Hidden commands
+
+    Several slash commands exist in the codebase but are not documented or surfaced in the help system:
+
+    | Command | Status | Description |
+    |---------|--------|-------------|
+    | `/btw` | Active | Ask a side question without interrupting the current task |
+    | `/stickers` | Active | Order Claude Code stickers (opens a browser window) |
+    | `/thinkback` | Active | 2025 Year in Review feature |
+    | `/effort` | Active | Set the model's effort level for the session |
+    | `/good-claude` | Stub | Hidden placeholder — no behavior implemented |
+    | `/bughunter` | Stub | Hidden placeholder — no behavior implemented |
+
+    The two stub commands (`/good-claude`, `/bughunter`) are registered in the command registry but contain no logic, suggesting they are reserved for future features.
+  </Tab>
+</Tabs>

@@ -1,0 +1,248 @@
+---
+title: "Tool System"
+description: The buildTool factory, tool lifecycle, and complete tool inventory
+---
+
+Every capability Claude Code has — reading files, running bash commands, searching the web — is implemented as a tool. Tools are first-class objects with a defined interface, registered into a dispatch map that the agent loop uses to route `tool_use` blocks from the Claude API.
+
+## The `buildTool` factory
+
+All tools are created through the `buildTool(definition)` factory in `Tool.ts`. The factory provides safe defaults for every property of the tool interface, so individual tool implementations only need to override the fields relevant to their behavior.
+
+```typescript
+// Tool.ts — simplified signature
+function buildTool<Input, Output, Progress>(
+  definition: Partial<Tool<Input, Output, Progress>>
+): Tool<Input, Output, Progress>
+```
+
+The factory pattern means:
+- Adding a new tool requires only defining the changed fields — the loop dispatch code stays identical.
+- Defaults are safe: `isReadOnly()` returns `false`, `isDestructive()` returns `false`, `isConcurrencySafe()` returns `false`.
+- Tool authors cannot accidentally skip required interface methods.
+
+<Note>
+The tool registry lives in `tools.ts`, which exports presets (read-only tools, default tools, etc.) and a filtering API used by the query engine to build the system prompt and the tool list sent to the Claude API.
+</Note>
+
+## The tool interface
+
+Every tool in Claude Code implements this interface:
+
+```text
+                    TOOL INTERFACE
+                    ==============
+
+    buildTool(definition) ──> Tool<Input, Output, Progress>
+
+    Every tool implements:
+    ┌────────────────────────────────────────────────────────┐
+    │  LIFECYCLE                                             │
+    │  ├── validateInput()      → reject bad args early     │
+    │  ├── checkPermissions()   → tool-specific authz       │
+    │  └── call()               → execute and return result │
+    │                                                        │
+    │  CAPABILITIES                                          │
+    │  ├── isEnabled()          → feature gate check        │
+    │  ├── isConcurrencySafe()  → can run in parallel?      │
+    │  ├── isReadOnly()         → no side effects?          │
+    │  ├── isDestructive()      → irreversible ops?         │
+    │  └── interruptBehavior()  → cancel or block on user?  │
+    │                                                        │
+    │  RENDERING (React/Ink)                                 │
+    │  ├── renderToolUseMessage()     → input display        │
+    │  ├── renderToolResultMessage()  → output display       │
+    │  ├── renderToolUseProgressMessage() → spinner/status   │
+    │  └── renderGroupedToolUse()     → parallel tool groups │
+    │                                                        │
+    │  AI FACING                                             │
+    │  ├── prompt()             → tool description for LLM  │
+    │  ├── description()        → dynamic description       │
+    │  └── mapToolResultToAPI() → format for API response   │
+    └────────────────────────────────────────────────────────┘
+```
+
+### Lifecycle methods
+
+These three methods define what a tool does and whether it is allowed to do it:
+
+**`validateInput(input)`** — Runs before any permission check. Parses and validates the tool's input against its Zod schema. If validation fails, the tool call is rejected immediately with an error `tool_result`, before any permission dialog is shown to the user.
+
+**`checkPermissions(input, context)`** — Tool-specific authorization logic that runs after the global permission pipeline approves the call. Used for fine-grained checks that only the tool itself can evaluate — for example, `FileEditTool` uses this to enforce path sandboxing, ensuring edits stay within allowed directories.
+
+**`call(input, context)`** — The actual implementation. Receives the validated input and returns an `Output` value that is serialized into the `tool_result` message. May emit `Progress` events during execution that drive the progress renderer.
+
+### Capability flags
+
+These flags control how the `StreamingToolExecutor` schedules the tool and how the UI presents it:
+
+| Method | Default | Meaning |
+|--------|---------|---------|
+| `isEnabled()` | `true` | Feature gate — return `false` to hide the tool entirely (used with feature flags) |
+| `isConcurrencySafe()` | `false` | If `true`, the executor may run this tool in parallel with other concurrent-safe tools |
+| `isReadOnly()` | `false` | Signals no side effects; used by plan mode to allow read tools without approval |
+| `isDestructive()` | `false` | Signals irreversible operations; shown with stronger permission warnings |
+| `interruptBehavior()` | `"cancel"` | Whether pressing Escape during execution cancels or blocks until the tool completes |
+
+### Rendering methods
+
+Tools own their own UI. The terminal interface (built with React/Ink) calls these methods to render tool activity inline in the conversation:
+
+**`renderToolUseMessage(input)`** — Renders the tool invocation as it appears before the result is known. Shows the tool name and its input arguments in a readable format (e.g., `BashTool` shows the command; `FileReadTool` shows the path).
+
+**`renderToolResultMessage(result)`** — Renders the tool's output after it completes. May truncate long results or apply syntax highlighting.
+
+**`renderToolUseProgressMessage(progress)`** — Renders intermediate progress during long-running tools. `BashTool` uses this to stream stdout/stderr output in real time.
+
+**`renderGroupedToolUse(tools)`** — Renders a batch of concurrent tool calls as a group, giving the user a unified view of parallel activity rather than individual entries.
+
+### AI-facing methods
+
+These methods define how the tool appears to Claude:
+
+**`prompt()`** — Returns the static tool description injected into the system prompt via `fetchSystemPromptParts()`. This is the primary way Claude learns how to use the tool correctly.
+
+**`description()`** — Returns a dynamic description that can vary at runtime (e.g., based on current settings or working directory). Used to build the JSON schema sent with each API request.
+
+**`mapToolResultToAPI(result)`** — Converts the tool's `Output` into the API format for the `tool_result` content block. For most tools this is a simple text serialization, but image-returning tools (like `FileReadTool` reading a PNG) return structured content with image blocks.
+
+## Complete tool inventory
+
+<Tabs>
+  <Tab title="File operations">
+    | Tool | Description |
+    |------|-------------|
+    | `FileReadTool` | Read file contents; handles PDF, images, plain text |
+    | `FileEditTool` | String-replace editing of existing files |
+    | `FileWriteTool` | Create or overwrite files |
+    | `NotebookEditTool` | Edit Jupyter notebook cells |
+  </Tab>
+  <Tab title="Search & discovery">
+    | Tool | Description |
+    |------|-------------|
+    | `GlobTool` | File pattern search (glob expressions) |
+    | `GrepTool` | Content search using ripgrep |
+    | `ToolSearchTool` | Search the registered tool list |
+  </Tab>
+  <Tab title="Execution">
+    | Tool | Description |
+    |------|-------------|
+    | `BashTool` | Execute shell commands; streams stdout/stderr |
+    | `PowerShellTool` | Execute PowerShell commands (Windows) |
+  </Tab>
+  <Tab title="Web & network">
+    | Tool | Description |
+    |------|-------------|
+    | `WebFetchTool` | HTTP fetch; returns page content as text |
+    | `WebSearchTool` | Web search; returns ranked results |
+  </Tab>
+  <Tab title="Agent / task">
+    | Tool | Description |
+    |------|-------------|
+    | `AgentTool` | Spawn a sub-agent (fork, in-process, or remote) |
+    | `SendMessageTool` | Send a message to another agent |
+    | `TeamCreateTool` | Create a named teammate agent |
+    | `TeamDeleteTool` | Terminate a teammate agent |
+    | `TaskCreateTool` | Create a task on the shared task board |
+    | `TaskGetTool` | Read a task's current state |
+    | `TaskUpdateTool` | Update task status or metadata |
+    | `TaskListTool` | List tasks with optional filters |
+    | `TaskStopTool` | Stop a running task |
+    | `TaskOutputTool` | Read a task's output |
+  </Tab>
+  <Tab title="MCP protocol">
+    | Tool | Description |
+    |------|-------------|
+    | `MCPTool` | Wrapper that proxies calls to any MCP server tool |
+    | `ListMcpResourcesTool` | List resources exposed by an MCP server |
+    | `ReadMcpResourceTool` | Read a specific MCP server resource |
+  </Tab>
+  <Tab title="Interaction & planning">
+    | Tool | Description |
+    |------|-------------|
+    | `AskUserQuestionTool` | Pause and prompt the user for input |
+    | `BriefTool` | Display a brief message without blocking |
+    | `EnterPlanModeTool` | Switch to plan mode (read-only tool execution) |
+    | `ExitPlanModeTool` | Return to normal execution mode |
+    | `EnterWorktreeTool` | Switch to an isolated git worktree |
+    | `ExitWorktreeTool` | Return from a worktree context |
+    | `TodoWriteTool` | Write a structured task list |
+    | `SkillTool` | Load and inject a skill into the conversation |
+    | `LSPTool` | Query the Language Server Protocol |
+    | `ConfigTool` | Read or modify settings |
+    | `ScheduleCronTool` | Schedule a cron-style recurring task |
+    | `SleepTool` | Pause execution for a specified duration |
+    | `TungstenTool` | Internal system tool |
+  </Tab>
+</Tabs>
+
+<Info>
+The inventory above covers tools observed in the analyzed codebase (v2.1.88). Several tools are gated behind feature flags (`VOICE_MODE`, `WEB_BROWSER_TOOL`, `WORKFLOW_SCRIPTS`, etc.) and are compiled out of the public bundle. The [Future Roadmap](/analysis/future-roadmap) page documents 17 additional unreleased tools found in the source. The full unreleased tool listing is in the [Tool Inventory reference](/reference/tool-inventory).
+</Info>
+
+## Tool execution flow
+
+When the agent loop receives a `tool_use` block from the Claude API, execution follows this sequence:
+
+```typescript
+// Simplified from StreamingToolExecutor + query.ts
+
+const tool = toolRegistry.get(toolName)
+
+// 1. Validate input (rejects malformed args before any permission check)
+const validatedInput = tool.validateInput(rawInput)
+
+// 2. Permission pipeline (hooks → rules → interactive prompt)
+const allowed = await canUseTool(tool, validatedInput, context)
+if (!allowed) {
+  return { type: "tool_result", error: "Permission denied" }
+}
+
+// 3. Tool-specific permission check (e.g., path sandboxing)
+await tool.checkPermissions(validatedInput, context)
+
+// 4. Execute
+const result = await tool.call(validatedInput, context)
+
+// 5. Format for API
+return tool.mapToolResultToAPI(result)
+```
+
+## Concurrency model
+
+`StreamingToolExecutor` (in `services/tools/StreamingToolExecutor.ts`) partitions a batch of tool calls before executing them:
+
+```text
+tool_use blocks from API response
+          │
+          ▼
+   partition by isConcurrencySafe()
+          │
+    ┌─────┴─────┐
+    │           │
+concurrent    serial
+safe tools    tools
+    │           │
+  run in      run one
+ parallel     at a time
+    │           │
+    └─────┬─────┘
+          │
+   collect all tool_results
+          │
+          ▼
+   append to messages[]
+```
+
+Read-only tools (`GlobTool`, `GrepTool`, `FileReadTool`) are typically `isConcurrencySafe()`, allowing Claude to explore a codebase in parallel. Write tools are serial to prevent race conditions.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Agent loop" icon="rotate-cw" href="/core/agent-loop">
+    How the loop dispatches tool calls and appends results
+  </Card>
+  <Card title="Permission system" icon="shield" href="/core/permission-system">
+    The full validateInput → hooks → rules → prompt → checkPermissions pipeline
+  </Card>
+</Columns>

@@ -1,0 +1,69 @@
+---
+title: "Introduction"
+description: "A deep research repository reverse-engineering the architecture, internals, and hidden features of Claude Code — Anthropic's CLI coding agent."
+---
+
+## What is this repository?
+
+This project is a learning and research repository focused on CLI agent architecture. All materials are compiled entirely from publicly available online references and community discussions, with a particular focus on public information regarding the highly popular CLI agent Claude Code (v2.1.88).
+
+Claude Code is Anthropic's command-line coding agent — a production-grade AI system that wraps the Claude API in a multi-layer harness covering streaming, tool execution, permissions, context compression, multi-agent coordination, session persistence, and remote bridge connectivity. Understanding how it is built helps developers design better agent systems of their own.
+
+This repository reverse-engineers that harness: its code structure, subsystem interactions, internal feature flags, hidden behaviors, and future roadmap signals — all from publicly observable sources.
+
+<Note>
+All content in this repository is provided strictly for technical research, study, and educational exchange among enthusiasts. **Commercial use is strictly prohibited.** No individual, organization, or entity may use this content for commercial purposes, profit-making activities, illegal activities, or any other unauthorized scenarios. If any content infringes upon your legal rights, intellectual property, or other interests, please contact the repository owner for immediate removal.
+</Note>
+
+## What Claude Code is
+
+At its core, Claude Code is a while-true loop: call the Claude API, check whether the response requires a tool, execute the tool, append the result, and loop. That minimal pattern is the foundation.
+
+What makes it a production system is the harness layered on top: 40+ built-in tools with a factory-based lifecycle, a permission engine with hooks and allow/deny rules, streaming parallel tool execution, three-strategy context compression, sub-agent forking, in-process teammates, remote bridge sessions, a Model Context Protocol (MCP) integration layer, cross-device settings sync, telemetry pipelines, compile-time feature flags, and an append-only JSONL session store.
+
+This repository documents all of it.
+
+## Codebase stats
+
+| Item | Count |
+|------|-------|
+| Files (.ts/.tsx) | ~1,884 |
+| Lines | ~512,664 |
+| Largest single file | `query.ts` (~785KB) |
+| Built-in tools | ~40+ |
+| Slash commands | ~80+ |
+| Dependencies (node_modules) | ~192 packages |
+| Runtime | Bun (compiled to Node.js >= 18 bundle) |
+
+## The five research reports
+
+The `docs/` directory contains five deep analysis reports compiled from publicly available online references and community discussions on Claude Code v2.1.88. Each is available in four languages (English, Japanese, Korean, and Chinese).
+
+<CardGroup cols={2}>
+  <Card title="Telemetry & Privacy" icon="chart-line" href="/analysis/telemetry-and-privacy">
+    Two analytics sinks (first-party OpenTelemetry and Datadog). Environment fingerprinting, process metrics, and repo hash on every event. No UI-exposed opt-out for first-party logging. `OTEL_LOG_TOOL_DETAILS=1` enables full tool input capture.
+  </Card>
+  <Card title="Hidden Features & Codenames" icon="eye-slash" href="/analysis/hidden-features-and-codenames">
+    Animal codenames: Capybara v8, Tengu, Fennec (Opus 4.6), and Numbat (next). Feature flags use random word pairs like `tengu_frond_boric` to obscure their purpose. Internal users receive better prompts, verification agents, and effort anchors. Hidden commands: `/btw`, `/stickers`.
+  </Card>
+  <Card title="Undercover Mode" icon="user-secret" href="/analysis/undercover-mode">
+    Official Anthropic employees auto-enter undercover mode in public repositories. The model is instructed: "Do not blow your cover" — stripping all AI attribution and writing commits "as a human developer would." No force-OFF exists.
+  </Card>
+  <Card title="Remote Control & Killswitches" icon="tower-broadcast" href="/analysis/remote-control-and-killswitches">
+    Hourly polling of `/api/claude_code/settings`. Dangerous changes show a blocking dialog — rejecting the dialog exits the application. Six or more killswitches found: bypass permissions, fast mode, voice mode, analytics sink, and more. GrowthBook flags can silently change any user's behavior.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Future Roadmap" icon="road" href="/analysis/future-roadmap">
+    The Numbat codename is confirmed. Opus 4.7 and Sonnet 4.8 are in development. KAIROS is a fully autonomous agent mode with `<tick>` heartbeats, push notifications, and PR subscriptions. Voice mode (push-to-talk) is implemented but gated. 17 unreleased tools were found in source.
+  </Card>
+</CardGroup>
+
+<Tip>
+All five reports are available in four languages: **English**, **日本語 (Japanese)**, **한국어 (Korean)**, and **中文 (Chinese)**. The full multilingual document tree lives in the `docs/` directory of the source repository.
+</Tip>
+
+## How to use this documentation
+
+Start with the [Architecture Overview](/architecture-overview) for a top-down map of every subsystem. Then work through the Core Architecture section — the agent loop, tool system, permission system, and context management form the foundation everything else depends on. From there, Advanced Systems covers multi-agent coordination, MCP integration, the bridge layer, and session persistence. The Deep Analysis tab contains the five research reports with findings that go beyond architecture into behavior and intent.
